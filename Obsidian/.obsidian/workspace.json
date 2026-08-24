@@ -1,0 +1,196 @@
+{
+  "main": {
+    "id": "cb4d55b4300421fe",
+    "type": "split",
+    "children": [
+      {
+        "id": "b1a995ba550ac5d5",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "da29f805eb95d1ef",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "06 - Tareas y Puntos Desarrollados/Tareas_2026-05-08.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "Tareas_2026-05-08"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "366cd869aab27f0c",
+    "type": "split",
+    "children": [
+      {
+        "id": "b2c17839f2cd58c1",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "f22eaca83393d916",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Explorador de archivos"
+            }
+          },
+          {
+            "id": "794cc641aa5bb6cb",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Buscar"
+            }
+          },
+          {
+            "id": "2ff66b899735a980",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "Marcadores"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "98d1052f3473799d",
+    "type": "split",
+    "children": [
+      {
+        "id": "c6a05ebe8d49060a",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "da8d46aea396ea01",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "02 - Road Map Desarrollo/Roadmap_Desarrollo.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Enlaces entrantes de Roadmap_Desarrollo"
+            }
+          },
+          {
+            "id": "0f549fa08034b0ce",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "02 - Road Map Desarrollo/Roadmap_Desarrollo.md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Enlaces salientes de Roadmap_Desarrollo"
+            }
+          },
+          {
+            "id": "c6e2e58c51b5bd8d",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Etiquetas"
+            }
+          },
+          {
+            "id": "f3dcb959560abba4",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "Todas las propiedades"
+            }
+          },
+          {
+            "id": "a5cda9393b8b2d75",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "02 - Road Map Desarrollo/Roadmap_Desarrollo.md",
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Esquema de Roadmap_Desarrollo"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Abrir selector rápido": false,
+      "graph:Abrir vista gráfica": false,
+      "canvas:Crear nuevo lienzo": false,
+      "daily-notes:Abrir la nota de hoy": false,
+      "templates:Insertar plantilla": false,
+      "command-palette:Abrir paleta de comandos": false,
+      "bases:Crear nueva base": false
+    }
+  },
+  "active": "da29f805eb95d1ef",
+  "lastOpenFiles": [
+    "05 - Diseño Técnico/Modelo_Entidades.md",
+    "04 - Propuesta Nueva Arquitectura/Propuesta_Multiplataforma.md",
+    "03 - Requisitos funcionales/02 - Mejoras/Requisitos_Mejorados.md",
+    "03 - Requisitos funcionales/01 - Actuales/Requisitos_Actuales.md",
+    "02 - Road Map Desarrollo/Roadmap_Desarrollo.md"
+  ]
+}

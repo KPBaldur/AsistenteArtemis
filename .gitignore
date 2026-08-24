@@ -1,0 +1,18 @@
+# .NET
+bin/
+obj/
+*.user
+
+# Node (por si algo queda fuera de TodoAppRoll.Web/.gitignore)
+node_modules/
+dist/
+
+# Repo anidado con su propio remoto — no se administra desde acá
+TodoApprRoll/
+
+# Editor / OS
+.vs/
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
