@@ -31,6 +31,20 @@ namespace TodoAppRoll.Api.Controllers
             return userIdClaim != null ? Guid.Parse(userIdClaim.Value) : Guid.Empty;
         }
 
+        private const int DefaultPomodoroMinutes = 25;
+
+        private static AlarmDto ToDto(Alarm a) => new AlarmDto
+        {
+            Id = a.Id,
+            Name = a.Name,
+            Type = a.Type,
+            DurationMinutes = a.DurationMinutes,
+            ScheduleAt = a.ScheduleAt,
+            IsActive = a.IsActive,
+            AudioId = a.AudioId,
+            ImageId = a.ImageId
+        };
+
         // GET: api/Alarm
         [HttpGet]
         public async Task<ActionResult<IEnumerable<AlarmDto>>> GetAlarms()
@@ -38,20 +52,9 @@ namespace TodoAppRoll.Api.Controllers
             var userId = GetUserId();
             var alarms = await _context.Alarms
                 .Where(a => a.UserId == userId)
-                .Select(a => new AlarmDto
-                {
-                    Id = a.Id,
-                    Name = a.Name,
-                    Type = a.Type,
-                    DurationMinutes = a.DurationMinutes,
-                    ScheduleAt = a.ScheduleAt,
-                    IsActive = a.IsActive,
-                    AudioId = a.AudioId,
-                    ImageId = a.ImageId
-                })
                 .ToListAsync();
 
-            return Ok(alarms);
+            return Ok(alarms.Select(ToDto));
         }
 
         // POST: api/Alarm
@@ -59,14 +62,35 @@ namespace TodoAppRoll.Api.Controllers
         public async Task<ActionResult<AlarmDto>> CreateAlarm(AlarmCreateDto createDto)
         {
             var userId = GetUserId();
+
+            if (string.IsNullOrWhiteSpace(createDto.Name))
+                return BadRequest(new { message = "El nombre es obligatorio" });
+
+            DateTime? scheduleAt;
+            int? durationMinutes = null;
+
+            if (createDto.Type == AlarmType.Pomodoro)
+            {
+                durationMinutes = createDto.DurationMinutes is > 0 ? createDto.DurationMinutes : DefaultPomodoroMinutes;
+                scheduleAt = DateTime.UtcNow.AddMinutes(durationMinutes.Value);
+            }
+            else
+            {
+                if (createDto.ScheduleAt == null)
+                    return BadRequest(new { message = "Fecha requerida para alarma datetime" });
+                if (createDto.ScheduleAt <= DateTime.UtcNow)
+                    return BadRequest(new { message = "La fecha de la alarma debe ser futura" });
+                scheduleAt = createDto.ScheduleAt;
+            }
+
             var alarm = new Alarm
             {
                 Id = Guid.NewGuid(),
                 UserId = userId,
-                Name = createDto.Name,
+                Name = createDto.Name.Trim(),
                 Type = createDto.Type,
-                DurationMinutes = createDto.DurationMinutes,
-                ScheduleAt = createDto.ScheduleAt,
+                DurationMinutes = durationMinutes,
+                ScheduleAt = scheduleAt,
                 AudioId = createDto.AudioId,
                 ImageId = createDto.ImageId,
                 IsActive = true
@@ -75,17 +99,7 @@ namespace TodoAppRoll.Api.Controllers
             _context.Alarms.Add(alarm);
             await _context.SaveChangesAsync();
 
-            return CreatedAtAction(nameof(GetAlarms), new { id = alarm.Id }, new AlarmDto
-            {
-                Id = alarm.Id,
-                Name = alarm.Name,
-                Type = alarm.Type,
-                DurationMinutes = alarm.DurationMinutes,
-                ScheduleAt = alarm.ScheduleAt,
-                IsActive = alarm.IsActive,
-                AudioId = alarm.AudioId,
-                ImageId = alarm.ImageId
-            });
+            return CreatedAtAction(nameof(GetAlarms), new { id = alarm.Id }, ToDto(alarm));
         }
 
         // PUT: api/Alarm/{id}
@@ -97,12 +111,32 @@ namespace TodoAppRoll.Api.Controllers
 
             if (alarm == null) return NotFound();
 
-            if (updateDto.Name != null) alarm.Name = updateDto.Name;
-            if (updateDto.IsActive.HasValue) alarm.IsActive = updateDto.IsActive.Value;
-            if (updateDto.DurationMinutes.HasValue) alarm.DurationMinutes = updateDto.DurationMinutes;
-            if (updateDto.ScheduleAt.HasValue) alarm.ScheduleAt = updateDto.ScheduleAt;
+            if (updateDto.Name != null) alarm.Name = updateDto.Name.Trim();
             if (updateDto.AudioId.HasValue) alarm.AudioId = updateDto.AudioId;
             if (updateDto.ImageId.HasValue) alarm.ImageId = updateDto.ImageId;
+
+            var reactivating = updateDto.IsActive == true && !alarm.IsActive;
+            var durationChanged = updateDto.DurationMinutes.HasValue && updateDto.DurationMinutes != alarm.DurationMinutes;
+
+            if (updateDto.DurationMinutes.HasValue) alarm.DurationMinutes = updateDto.DurationMinutes;
+            if (updateDto.IsActive.HasValue) alarm.IsActive = updateDto.IsActive.Value;
+
+            if (!alarm.IsActive)
+            {
+                // Desactivada: no debe volver a sonar hasta que se reactive explícitamente.
+                alarm.ScheduleAt = null;
+            }
+            else if (updateDto.ScheduleAt.HasValue)
+            {
+                // Cambio explícito de horario (ej: snooze).
+                alarm.ScheduleAt = updateDto.ScheduleAt;
+            }
+            else if (alarm.Type == AlarmType.Pomodoro && (reactivating || durationChanged))
+            {
+                // Reactivación o cambio de duración: reinicia el conteo desde ahora.
+                var duration = alarm.DurationMinutes is > 0 ? alarm.DurationMinutes.Value : DefaultPomodoroMinutes;
+                alarm.ScheduleAt = DateTime.UtcNow.AddMinutes(duration);
+            }
 
             await _context.SaveChangesAsync();
             return NoContent();

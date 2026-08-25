@@ -24,6 +24,7 @@ namespace TodoAppRoll.Api
 
             // Registro de Servicios Personalizados
             builder.Services.AddScoped<ICloudinaryService, CloudinaryService>();
+            builder.Services.AddHostedService<AlarmSchedulerService>();
 
             // CORS: en Development el puerto de Vite es impredecible (varía según qué otros
             // proyectos locales ya estén corriendo), así que se permite cualquier localhost.
