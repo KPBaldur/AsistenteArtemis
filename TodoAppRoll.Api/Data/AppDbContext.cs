@@ -25,7 +25,11 @@ namespace TodoAppRoll.Api.Data
             base.OnModelCreating(modelBuilder);
 
             // Configuraciones adicionales (Fluent API) si son necesarias
-            
+
+            modelBuilder.Entity<User>()
+                .HasIndex(u => u.Username)
+                .IsUnique();
+
             // Relación Task - Alarm (Opcional 1:1 o 1:N según lógica)
             modelBuilder.Entity<Task>()
                 .HasOne(t => t.Alarm)
