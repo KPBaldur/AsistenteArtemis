@@ -19,6 +19,8 @@ namespace TodoAppRoll.Api.Data
         public DbSet<AIMessage> AIMessages { get; set; } = null!;
         public DbSet<AISmartSuggestion> AISmartSuggestions { get; set; } = null!;
         public DbSet<AuditLog> AuditLogs { get; set; } = null!;
+        public DbSet<Note> Notes { get; set; } = null!;
+        public DbSet<NoteLink> NoteLinks { get; set; } = null!;
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -49,6 +51,27 @@ namespace TodoAppRoll.Api.Data
                 .WithMany()
                 .HasForeignKey(a => a.ImageId)
                 .OnDelete(DeleteBehavior.NoAction);
+
+            // Nota - Tarea (asociación opcional, no cascadea al borrar la tarea)
+            modelBuilder.Entity<Note>()
+                .HasOne(n => n.Task)
+                .WithMany()
+                .HasForeignKey(n => n.TaskId)
+                .OnDelete(DeleteBehavior.SetNull);
+
+            // NoteLink: dos FKs a la misma tabla (Note) — Restrict en ambas para evitar
+            // múltiples rutas de cascada; los links se limpian explícitamente al borrar/editar una nota.
+            modelBuilder.Entity<NoteLink>()
+                .HasOne(nl => nl.SourceNote)
+                .WithMany(n => n.OutgoingLinks)
+                .HasForeignKey(nl => nl.SourceNoteId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            modelBuilder.Entity<NoteLink>()
+                .HasOne(nl => nl.TargetNote)
+                .WithMany(n => n.IncomingLinks)
+                .HasForeignKey(nl => nl.TargetNoteId)
+                .OnDelete(DeleteBehavior.Restrict);
         }
     }
 }

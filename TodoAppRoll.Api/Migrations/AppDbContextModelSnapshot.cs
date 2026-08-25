@@ -210,6 +210,66 @@ namespace TodoAppRoll.Api.Migrations
                     b.ToTable("MediaFiles");
                 });
 
+            modelBuilder.Entity("TodoAppRoll.Api.Models.Entities.Note", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Content")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("PropertiesJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<Guid?>("TaskId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TaskId");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("Notes");
+                });
+
+            modelBuilder.Entity("TodoAppRoll.Api.Models.Entities.NoteLink", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("SourceNoteId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("TargetNoteId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("SourceNoteId");
+
+                    b.HasIndex("TargetNoteId");
+
+                    b.ToTable("NoteLinks");
+                });
+
             modelBuilder.Entity("TodoAppRoll.Api.Models.Entities.Subtask", b =>
                 {
                     b.Property<Guid>("Id")
@@ -399,6 +459,43 @@ namespace TodoAppRoll.Api.Migrations
                     b.Navigation("User");
                 });
 
+            modelBuilder.Entity("TodoAppRoll.Api.Models.Entities.Note", b =>
+                {
+                    b.HasOne("TodoAppRoll.Api.Models.Entities.Task", "Task")
+                        .WithMany()
+                        .HasForeignKey("TaskId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("TodoAppRoll.Api.Models.Entities.User", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Task");
+
+                    b.Navigation("User");
+                });
+
+            modelBuilder.Entity("TodoAppRoll.Api.Models.Entities.NoteLink", b =>
+                {
+                    b.HasOne("TodoAppRoll.Api.Models.Entities.Note", "SourceNote")
+                        .WithMany("OutgoingLinks")
+                        .HasForeignKey("SourceNoteId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("TodoAppRoll.Api.Models.Entities.Note", "TargetNote")
+                        .WithMany("IncomingLinks")
+                        .HasForeignKey("TargetNoteId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("SourceNote");
+
+                    b.Navigation("TargetNote");
+                });
+
             modelBuilder.Entity("TodoAppRoll.Api.Models.Entities.Subtask", b =>
                 {
                     b.HasOne("TodoAppRoll.Api.Models.Entities.Task", "Task")
@@ -431,6 +528,13 @@ namespace TodoAppRoll.Api.Migrations
             modelBuilder.Entity("TodoAppRoll.Api.Models.Entities.AIChatSession", b =>
                 {
                     b.Navigation("Messages");
+                });
+
+            modelBuilder.Entity("TodoAppRoll.Api.Models.Entities.Note", b =>
+                {
+                    b.Navigation("IncomingLinks");
+
+                    b.Navigation("OutgoingLinks");
                 });
 
             modelBuilder.Entity("TodoAppRoll.Api.Models.Entities.Task", b =>
