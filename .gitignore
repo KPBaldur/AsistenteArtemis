@@ -10,6 +10,10 @@ dist/
 # Repo anidado con su propio remoto — no se administra desde acá
 TodoApprRoll/
 
+# Godot (DesktopMascot/)
+.godot/
+export_presets.cfg
+
 # Editor / OS
 .vs/
 .vscode/*
