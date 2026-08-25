@@ -14,6 +14,11 @@ TodoApprRoll/
 .godot/
 export_presets.cfg
 
+# El patrón "bin/" de arriba (pensado para build output de .NET) también
+# bloquea la carpeta bin/ del addon de Godot, que trae los .dll reales
+# de la física de VRM (no son build output, hay que commitearlos).
+!DesktopMascot/addons/**/bin/
+
 # Editor / OS
 .vs/
 .vscode/*
