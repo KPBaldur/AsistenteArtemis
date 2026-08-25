@@ -57,9 +57,12 @@ namespace TodoAppRoll.Api.Controllers
             if (file == null || file.Length == 0)
                 return BadRequest("No se proporcionó ningún archivo");
 
+            if (type != "audio" && type != "image")
+                return BadRequest(new { message = "Tipo inválido. Usa 'image' o 'audio'." });
+
             // Subir a Cloudinary (vía servicio)
             var folder = type == "audio" ? "TodoAppRoll/Audios" : "TodoAppRoll/Images";
-            var (url, publicId) = await _cloudinaryService.UploadFileAsync(file, folder);
+            var (url, publicId) = await _cloudinaryService.UploadFileAsync(file, folder, type);
 
             var media = new Media
             {
@@ -94,7 +97,7 @@ namespace TodoAppRoll.Api.Controllers
             if (media == null) return NotFound();
 
             // Eliminar de Cloudinary
-            await _cloudinaryService.DeleteFileAsync(media.PublicId);
+            await _cloudinaryService.DeleteFileAsync(media.PublicId, media.FileType);
 
             _context.MediaFiles.Remove(media);
             await _context.SaveChangesAsync();
