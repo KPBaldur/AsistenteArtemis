@@ -16,6 +16,10 @@ namespace TodoAppRoll.Api.Models.Entities
         public string Theme { get; set; } = "System"; // Light, Dark, System
         public bool NotificationsEnabled { get; set; } = true;
 
+        // Refresh token (rotado en cada uso)
+        public string? RefreshToken { get; set; }
+        public DateTime? RefreshTokenExpiryTime { get; set; }
+
         // Relaciones
         public virtual ICollection<Task> Tasks { get; set; } = new List<Task>();
         public virtual ICollection<Alarm> Alarms { get; set; } = new List<Alarm>();

@@ -21,7 +21,7 @@ const LoginPage: React.FC = () => {
             const response = await api.post(endpoint, payload);
             
             if (isLogin) {
-                setAuth(response.data.user, response.data.token);
+                setAuth(response.data.user, response.data.token, response.data.refreshToken);
                 navigate('/');
             } else {
                 setIsLogin(true);

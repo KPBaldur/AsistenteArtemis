@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text;
 using TodoAppRoll.Api.Data;
 using TodoAppRoll.Api.Models.DTOs;
@@ -71,11 +72,17 @@ namespace TodoAppRoll.Api.Controllers
                 return Unauthorized(new { message = "Credenciales inválidas" });
             }
 
-            var token = CreateToken(user);
+            var token = CreateAccessToken(user);
+            var refreshToken = GenerateRefreshToken();
+
+            user.RefreshToken = refreshToken;
+            user.RefreshTokenExpiryTime = DateTime.UtcNow.AddDays(RefreshTokenDays);
+            await _context.SaveChangesAsync();
 
             return Ok(new AuthResponseDto
             {
                 Token = token,
+                RefreshToken = refreshToken,
                 User = new UserDto
                 {
                     Id = user.Id,
@@ -88,7 +95,97 @@ namespace TodoAppRoll.Api.Controllers
             });
         }
 
-        private string CreateToken(User user)
+        [HttpPost("refresh")]
+        public async Task<ActionResult<AuthResponseDto>> Refresh(RefreshRequestDto request)
+        {
+            ClaimsPrincipal principal;
+            try
+            {
+                principal = GetPrincipalFromExpiredToken(request.Token);
+            }
+            catch (SecurityTokenException)
+            {
+                return Unauthorized(new { message = "Token inválido" });
+            }
+
+            var userIdClaim = principal.FindFirstValue(ClaimTypes.NameIdentifier);
+            if (userIdClaim == null || !Guid.TryParse(userIdClaim, out var userId))
+            {
+                return Unauthorized(new { message = "Token inválido" });
+            }
+
+            var user = await _context.Users.FirstOrDefaultAsync(u => u.Id == userId);
+
+            if (user == null
+                || user.RefreshToken != request.RefreshToken
+                || user.RefreshTokenExpiryTime == null
+                || user.RefreshTokenExpiryTime <= DateTime.UtcNow)
+            {
+                return Unauthorized(new { message = "Refresh token inválido o expirado" });
+            }
+
+            var newAccessToken = CreateAccessToken(user);
+            var newRefreshToken = GenerateRefreshToken();
+
+            user.RefreshToken = newRefreshToken;
+            user.RefreshTokenExpiryTime = DateTime.UtcNow.AddDays(RefreshTokenDays);
+            await _context.SaveChangesAsync();
+
+            return Ok(new AuthResponseDto
+            {
+                Token = newAccessToken,
+                RefreshToken = newRefreshToken,
+                User = new UserDto
+                {
+                    Id = user.Id,
+                    Username = user.Username,
+                    Email = user.Email,
+                    Theme = user.Theme,
+                    NotificationsEnabled = user.NotificationsEnabled,
+                    CreatedAt = user.CreatedAt
+                }
+            });
+        }
+
+        [HttpPost("revoke")]
+        public async Task<IActionResult> Revoke(RefreshRequestDto request)
+        {
+            ClaimsPrincipal principal;
+            try
+            {
+                principal = GetPrincipalFromExpiredToken(request.Token);
+            }
+            catch (SecurityTokenException)
+            {
+                return NoContent();
+            }
+
+            var userIdClaim = principal.FindFirstValue(ClaimTypes.NameIdentifier);
+            if (userIdClaim != null && Guid.TryParse(userIdClaim, out var userId))
+            {
+                var user = await _context.Users.FirstOrDefaultAsync(u => u.Id == userId && u.RefreshToken == request.RefreshToken);
+                if (user != null)
+                {
+                    user.RefreshToken = null;
+                    user.RefreshTokenExpiryTime = null;
+                    await _context.SaveChangesAsync();
+                }
+            }
+
+            return NoContent();
+        }
+
+        private const int AccessTokenMinutes = 15;
+        private const int RefreshTokenDays = 30;
+
+        private SymmetricSecurityKey GetSigningKey()
+        {
+            var keyStr = _configuration["Jwt:Key"]
+                ?? throw new InvalidOperationException("Falta configurar Jwt:Key");
+            return new SymmetricSecurityKey(Encoding.UTF8.GetBytes(keyStr));
+        }
+
+        private string CreateAccessToken(User user)
         {
             var claims = new List<Claim>
             {
@@ -97,14 +194,12 @@ namespace TodoAppRoll.Api.Controllers
                 new Claim(ClaimTypes.Email, user.Email)
             };
 
-            var keyStr = _configuration["Jwt:Key"] ?? "TodoAppRollSecretKeyDefaultLongEnough";
-            var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(keyStr));
-            var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha512Signature);
+            var creds = new SigningCredentials(GetSigningKey(), SecurityAlgorithms.HmacSha512Signature);
 
             var tokenDescriptor = new SecurityTokenDescriptor
             {
                 Subject = new ClaimsIdentity(claims),
-                Expires = DateTime.Now.AddDays(7),
+                Expires = DateTime.UtcNow.AddMinutes(AccessTokenMinutes),
                 SigningCredentials = creds,
                 Issuer = _configuration["Jwt:Issuer"],
                 Audience = _configuration["Jwt:Audience"]
@@ -114,6 +209,37 @@ namespace TodoAppRoll.Api.Controllers
             var token = tokenHandler.CreateToken(tokenDescriptor);
 
             return tokenHandler.WriteToken(token);
+        }
+
+        private static string GenerateRefreshToken()
+        {
+            var randomBytes = RandomNumberGenerator.GetBytes(64);
+            return Convert.ToBase64String(randomBytes);
+        }
+
+        private ClaimsPrincipal GetPrincipalFromExpiredToken(string token)
+        {
+            var tokenValidationParameters = new TokenValidationParameters
+            {
+                ValidateIssuerSigningKey = true,
+                IssuerSigningKey = GetSigningKey(),
+                ValidateIssuer = true,
+                ValidIssuer = _configuration["Jwt:Issuer"],
+                ValidateAudience = true,
+                ValidAudience = _configuration["Jwt:Audience"],
+                ValidateLifetime = false
+            };
+
+            var tokenHandler = new JwtSecurityTokenHandler();
+            var principal = tokenHandler.ValidateToken(token, tokenValidationParameters, out var securityToken);
+
+            if (securityToken is not JwtSecurityToken jwtSecurityToken
+                || !jwtSecurityToken.Header.Alg.Equals(SecurityAlgorithms.HmacSha512, StringComparison.InvariantCultureIgnoreCase))
+            {
+                throw new SecurityTokenException("Token inválido");
+            }
+
+            return principal;
         }
     }
 }
