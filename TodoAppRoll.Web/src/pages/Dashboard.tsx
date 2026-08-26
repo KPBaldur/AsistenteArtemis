@@ -1,13 +1,16 @@
 import React, { useState } from 'react';
 import { useAuthStore } from '../store/authStore';
 import { useTasks } from '../hooks/useTasks';
+import { useMonitorAlerts } from '../hooks/useMonitorAlerts';
 import { TaskStatus, TaskPriority } from '../types';
 import TaskItem from '../components/TaskItem';
+import MonitorAlertToast from '../components/MonitorAlertToast';
 import { LogOut, CheckCircle2, Clock, Plus, LayoutDashboard, Loader2 } from 'lucide-react';
 
 const Dashboard: React.FC = () => {
     const { user, logout } = useAuthStore();
     const { tasks, isLoading, createTask, updateTask, deleteTask, toggleSubtask } = useTasks();
+    useMonitorAlerts();
     const [isAdding, setIsAdding] = useState(false);
     const [newTitle, setNewTitle] = useState('');
 
@@ -162,6 +165,7 @@ const Dashboard: React.FC = () => {
                     )}
                 </div>
             </main>
+            <MonitorAlertToast />
         </div>
     );
 };
