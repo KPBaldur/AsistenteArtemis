@@ -25,6 +25,8 @@ namespace TodoAppRoll.Api
             // Registro de Servicios Personalizados
             builder.Services.AddScoped<ICloudinaryService, CloudinaryService>();
             builder.Services.AddHostedService<AlarmSchedulerService>();
+            builder.Services.AddHostedService<ServerMonitorService>();
+            builder.Services.AddHttpClient("MonitorPing", c => c.Timeout = TimeSpan.FromSeconds(45));
 
             // CORS: en Development el puerto de Vite es impredecible (varía según qué otros
             // proyectos locales ya estén corriendo), así que se permite cualquier localhost.
@@ -107,6 +109,7 @@ namespace TodoAppRoll.Api
             
             // Mapeo de Hubs de SignalR
             app.MapHub<AlarmHub>("/hubs/alarms");
+            app.MapHub<MonitorHub>("/hubs/monitors");
 
             app.Run();
         }

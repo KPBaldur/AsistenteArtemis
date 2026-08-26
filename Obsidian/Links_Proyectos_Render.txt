@@ -1,0 +1,3 @@
+Uma_backend:https://uma-backend-zoor.onrender.com
+Finanzas_hogar_api:https://finanzas-hogar-api-qmwd.onrender.com
+ApiRegularShow:https://apiregularshow.onrender.com

@@ -20,4 +20,17 @@ namespace TodoAppRoll.Api.Models.Enums
         Pomodoro,
         DateTime
     }
+
+    public enum MonitorCheckType
+    {
+        HttpPing,
+        PostgresConnection
+    }
+
+    public enum MonitorStatus
+    {
+        Unknown,
+        Up,
+        Down
+    }
 }

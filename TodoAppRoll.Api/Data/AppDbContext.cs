@@ -21,6 +21,8 @@ namespace TodoAppRoll.Api.Data
         public DbSet<AuditLog> AuditLogs { get; set; } = null!;
         public DbSet<Note> Notes { get; set; } = null!;
         public DbSet<NoteLink> NoteLinks { get; set; } = null!;
+        public DbSet<ServerMonitor> Monitors { get; set; } = null!;
+        public DbSet<MonitorCheckResult> MonitorCheckResults { get; set; } = null!;
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -72,6 +74,13 @@ namespace TodoAppRoll.Api.Data
                 .WithMany(n => n.IncomingLinks)
                 .HasForeignKey(nl => nl.TargetNoteId)
                 .OnDelete(DeleteBehavior.Restrict);
+
+            // Historial de chequeos de un monitor: sin su padre no tiene sentido, sí cascadea.
+            modelBuilder.Entity<MonitorCheckResult>()
+                .HasOne(mcr => mcr.Monitor)
+                .WithMany(m => m.CheckResults)
+                .HasForeignKey(mcr => mcr.MonitorId)
+                .OnDelete(DeleteBehavior.Cascade);
         }
     }
 }

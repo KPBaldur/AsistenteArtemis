@@ -210,6 +210,34 @@ namespace TodoAppRoll.Api.Migrations
                     b.ToTable("MediaFiles");
                 });
 
+            modelBuilder.Entity("TodoAppRoll.Api.Models.Entities.MonitorCheckResult", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CheckedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ErrorMessage")
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("MonitorId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int?>("ResponseTimeMs")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("MonitorId");
+
+                    b.ToTable("MonitorCheckResults");
+                });
+
             modelBuilder.Entity("TodoAppRoll.Api.Models.Entities.Note", b =>
                 {
                     b.Property<Guid>("Id")
@@ -268,6 +296,48 @@ namespace TodoAppRoll.Api.Migrations
                     b.HasIndex("TargetNoteId");
 
                     b.ToTable("NoteLinks");
+                });
+
+            modelBuilder.Entity("TodoAppRoll.Api.Models.Entities.ServerMonitor", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTime?>("LastCheckedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("LastErrorMessage")
+                        .HasColumnType("text");
+
+                    b.Property<int?>("LastResponseTimeMs")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("LastStatus")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Target")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<int>("Type")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("Monitors");
                 });
 
             modelBuilder.Entity("TodoAppRoll.Api.Models.Entities.Subtask", b =>
@@ -465,6 +535,17 @@ namespace TodoAppRoll.Api.Migrations
                     b.Navigation("User");
                 });
 
+            modelBuilder.Entity("TodoAppRoll.Api.Models.Entities.MonitorCheckResult", b =>
+                {
+                    b.HasOne("TodoAppRoll.Api.Models.Entities.ServerMonitor", "Monitor")
+                        .WithMany("CheckResults")
+                        .HasForeignKey("MonitorId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Monitor");
+                });
+
             modelBuilder.Entity("TodoAppRoll.Api.Models.Entities.Note", b =>
                 {
                     b.HasOne("TodoAppRoll.Api.Models.Entities.Task", "Task")
@@ -500,6 +581,17 @@ namespace TodoAppRoll.Api.Migrations
                     b.Navigation("SourceNote");
 
                     b.Navigation("TargetNote");
+                });
+
+            modelBuilder.Entity("TodoAppRoll.Api.Models.Entities.ServerMonitor", b =>
+                {
+                    b.HasOne("TodoAppRoll.Api.Models.Entities.User", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("User");
                 });
 
             modelBuilder.Entity("TodoAppRoll.Api.Models.Entities.Subtask", b =>
@@ -541,6 +633,11 @@ namespace TodoAppRoll.Api.Migrations
                     b.Navigation("IncomingLinks");
 
                     b.Navigation("OutgoingLinks");
+                });
+
+            modelBuilder.Entity("TodoAppRoll.Api.Models.Entities.ServerMonitor", b =>
+                {
+                    b.Navigation("CheckResults");
                 });
 
             modelBuilder.Entity("TodoAppRoll.Api.Models.Entities.Task", b =>
