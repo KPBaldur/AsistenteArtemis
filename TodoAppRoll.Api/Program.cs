@@ -27,6 +27,12 @@ namespace TodoAppRoll.Api
             builder.Services.AddHostedService<AlarmSchedulerService>();
             builder.Services.AddHostedService<ServerMonitorService>();
             builder.Services.AddHttpClient("MonitorPing", c => c.Timeout = TimeSpan.FromSeconds(45));
+            builder.Services.AddHttpClient("Brain", c =>
+            {
+                c.BaseAddress = new Uri(builder.Configuration["Brain:BaseUrl"]
+                    ?? throw new InvalidOperationException("Falta configurar Brain:BaseUrl"));
+                c.Timeout = TimeSpan.FromSeconds(60);
+            });
 
             // CORS: en Development el puerto de Vite es impredecible (varía según qué otros
             // proyectos locales ya estén corriendo), así que se permite cualquier localhost.
