@@ -54,6 +54,7 @@ class Task(Base):
     Title: Mapped[str] = mapped_column(Text)
     Status: Mapped[int] = mapped_column(Integer)  # TaskStatus: 0 Pending, 1 InProgress, 2 Completed, 3 Archived
     AlarmId: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    CompletedAt: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class Alarm(Base):
@@ -80,4 +81,30 @@ class AIMessage(Base):
     SessionId: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
     Role: Mapped[str] = mapped_column(Text)
     Content: Mapped[str] = mapped_column(Text)
+    CreatedAt: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class AssistantIdentity(Base):
+    __tablename__ = "AssistantIdentities"
+
+    Id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    UserId: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    Name: Mapped[str] = mapped_column(Text)
+    Tone: Mapped[str] = mapped_column(Text)
+    StyleRules: Mapped[str] = mapped_column(Text)
+
+
+class AISmartSuggestion(Base):
+    """El Brain es quien escribe acá (genera las sugerencias vía Gemini); la Api
+    .NET solo lee/marca IsApplied (SmartSuggestionController) -- mismo patrón
+    invertido que note_embeddings (ahí el Brain escribe y nadie más)."""
+
+    __tablename__ = "AISmartSuggestions"
+
+    Id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    UserId: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    SuggestionType: Mapped[str] = mapped_column(Text)
+    Content: Mapped[str] = mapped_column(Text)
+    RelatedEntityId: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    IsApplied: Mapped[bool] = mapped_column(Boolean)
     CreatedAt: Mapped[datetime] = mapped_column(DateTime(timezone=True))

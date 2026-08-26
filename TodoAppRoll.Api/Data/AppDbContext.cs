@@ -23,6 +23,7 @@ namespace TodoAppRoll.Api.Data
         public DbSet<NoteLink> NoteLinks { get; set; } = null!;
         public DbSet<ServerMonitor> Monitors { get; set; } = null!;
         public DbSet<MonitorCheckResult> MonitorCheckResults { get; set; } = null!;
+        public DbSet<AssistantIdentity> AssistantIdentities { get; set; } = null!;
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -81,6 +82,11 @@ namespace TodoAppRoll.Api.Data
                 .WithMany(m => m.CheckResults)
                 .HasForeignKey(mcr => mcr.MonitorId)
                 .OnDelete(DeleteBehavior.Cascade);
+
+            // Una sola identidad activa por usuario.
+            modelBuilder.Entity<AssistantIdentity>()
+                .HasIndex(a => a.UserId)
+                .IsUnique();
         }
     }
 }

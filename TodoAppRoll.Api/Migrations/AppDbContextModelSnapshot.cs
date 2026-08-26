@@ -88,6 +88,9 @@ namespace TodoAppRoll.Api.Migrations
                     b.Property<bool>("IsApplied")
                         .HasColumnType("boolean");
 
+                    b.Property<Guid?>("RelatedEntityId")
+                        .HasColumnType("uuid");
+
                     b.Property<string>("SuggestionType")
                         .IsRequired()
                         .HasColumnType("text");
@@ -142,6 +145,38 @@ namespace TodoAppRoll.Api.Migrations
                     b.HasIndex("UserId");
 
                     b.ToTable("Alarms");
+                });
+
+            modelBuilder.Entity("TodoAppRoll.Api.Models.Entities.AssistantIdentity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("StyleRules")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Tone")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("UserId")
+                        .IsUnique();
+
+                    b.ToTable("AssistantIdentities");
                 });
 
             modelBuilder.Entity("TodoAppRoll.Api.Models.Entities.AuditLog", b =>
@@ -509,6 +544,17 @@ namespace TodoAppRoll.Api.Migrations
                     b.Navigation("Audio");
 
                     b.Navigation("Image");
+
+                    b.Navigation("User");
+                });
+
+            modelBuilder.Entity("TodoAppRoll.Api.Models.Entities.AssistantIdentity", b =>
+                {
+                    b.HasOne("TodoAppRoll.Api.Models.Entities.User", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
 
                     b.Navigation("User");
                 });

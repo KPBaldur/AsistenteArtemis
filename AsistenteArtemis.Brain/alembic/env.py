@@ -20,7 +20,10 @@ target_metadata = Base.metadata
 # Tablas mapeadas de solo lectura que dueña TodoAppRoll.Api (EF Core) -- nunca
 # deben aparecer en un autogenerate del Brain, que solo administra sus propias
 # tablas (hoy: note_embeddings).
-_EF_CORE_OWNED_TABLES = {"Notes", "Tasks", "Alarms", "AIChatSessions", "AIMessages"}
+_EF_CORE_OWNED_TABLES = {
+    "Notes", "Tasks", "Alarms", "AIChatSessions", "AIMessages",
+    "AssistantIdentities", "AISmartSuggestions",
+}
 
 
 def include_object(object, name, type_, reflected, compare_to):

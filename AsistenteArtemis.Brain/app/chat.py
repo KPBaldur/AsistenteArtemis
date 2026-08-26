@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.config import GEMINI_API_KEY, INTERNAL_API_KEY
 from app.db import get_db
 from app.embeddings import embed_texts
+from app.identity import build_system_instruction
 from app.models import AIMessage, Alarm, Note, NoteEmbedding, Task
 
 router = APIRouter(prefix="/internal", tags=["chat"])
@@ -84,7 +85,9 @@ def _recent_history(db: Session, session_id: uuid.UUID) -> list[AIMessage]:
     return list(reversed(rows))
 
 
-def _build_prompt(note_chunks: list[str], tasks_summary: str, history: list[AIMessage], message: str) -> str:
+def _build_prompt(
+    system_instruction: str, note_chunks: list[str], tasks_summary: str, history: list[AIMessage], message: str
+) -> str:
     notes_section = (
         "\n\n".join(f"- {chunk}" for chunk in note_chunks)
         if note_chunks
@@ -92,7 +95,7 @@ def _build_prompt(note_chunks: list[str], tasks_summary: str, history: list[AIMe
     )
     history_section = "\n".join(f"{m.Role}: {m.Content}" for m in history) if history else "(sin mensajes previos)"
 
-    return f"""Sos el asistente personal de IA de AsistenteArtemis. Respondé en español, de forma directa y concreta, basándote solo en el contexto real provisto abajo -- si el contexto no alcanza para responder, decilo en vez de inventar.
+    return f"""{system_instruction}
 
 # Notas relevantes del usuario
 {notes_section}
@@ -108,11 +111,12 @@ def _build_prompt(note_chunks: list[str], tasks_summary: str, history: list[AIMe
 
 @router.post("/chat", response_model=ChatResponse, dependencies=[Depends(require_internal_key)])
 def chat(request: ChatRequest, db: Session = Depends(get_db)) -> ChatResponse:
+    system_instruction = build_system_instruction(db, request.user_id)
     note_chunks = _retrieve_note_chunks(db, request.user_id, request.message)
     tasks_summary = _upcoming_tasks_summary(db, request.user_id)
     history = _recent_history(db, request.session_id)
 
-    prompt = _build_prompt(note_chunks, tasks_summary, history, request.message)
+    prompt = _build_prompt(system_instruction, note_chunks, tasks_summary, history, request.message)
 
     try:
         interaction = _client.interactions.create(
