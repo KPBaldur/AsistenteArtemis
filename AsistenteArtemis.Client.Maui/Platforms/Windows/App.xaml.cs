@@ -1,4 +1,5 @@
-﻿using Microsoft.UI.Xaml;
+﻿using CommunityToolkit.WinUI.Notifications;
+using Microsoft.UI.Xaml;
 
 // To learn more about WinUI, the WinUI project structure,
 // and more about our project templates, see: http://aka.ms/winui-project-info.
@@ -17,6 +18,11 @@ public partial class App : MauiWinUIApplication
 	public App()
 	{
 		this.InitializeComponent();
+
+		// Registra el AUMID/shortcut que una app no empaquetada (WindowsPackageType=None)
+		// necesita para poder mandar toasts nativos — sin esto, ToastContentBuilder falla en
+		// runtime. Solo informativas por ahora, no hay acciones que manejar en la activación.
+		ToastNotificationManagerCompat.OnActivated += _ => { };
 	}
 
 	protected override MauiApp CreateMauiApp() => MauiProgram.CreateMauiApp();

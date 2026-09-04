@@ -1,4 +1,5 @@
 ﻿using AsistenteArtemis.Client.Maui.Services;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Plugin.Maui.Audio;
 
@@ -20,6 +21,7 @@ public static class MauiProgram
 
 		builder.Services.AddSingleton<TokenStore>();
 		builder.Services.AddSingleton<AuthState>();
+		builder.Services.AddSingleton<AlarmNotificationService>();
 		builder.Services.AddTransient<AuthDelegatingHandler>();
 
 		// AuthApiClient carries no bearer token (login/register/refresh don't need one), so no
@@ -66,6 +68,13 @@ public static class MauiProgram
 		builder.Logging.AddDebug();
 #endif
 
-		return builder.Build();
+		var app = builder.Build();
+
+		// AlarmNotificationService es Singleton pero nadie lo pide por constructor en ningún
+		// componente — sin esto, el contenedor de DI nunca lo instancia y su conexión de
+		// SignalR (que existe para mandar el toast nativo desde cualquier página) jamás arranca.
+		app.Services.GetRequiredService<AlarmNotificationService>();
+
+		return app;
 	}
 }

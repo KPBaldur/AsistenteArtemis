@@ -7,6 +7,7 @@
 @inject TokenStore TokenStore
 @inject AuthState AuthState
 @inject NavigationManager Navigation
+@inject AlarmNotificationService NotificationService
 
 <h1>Alarmas</h1>
 
@@ -31,21 +32,10 @@ else
     @foreach (var ringing in _ringingAlarms)
     {
         <div style="background:#eef; border:1px solid #99f; padding:0.5em; margin-bottom:0.5em;">
-            @if (ringing.HasActiveBreak)
+            🔔 @GetRingingMessage(ringing)
+            @if (!ringing.HasActiveBreak)
             {
-                @if (ringing.PhaseJustEnded == "Work")
-                {
-                    <text>🔔 ¡Terminó tu tiempo de trabajo en "@ringing.Name"! Descansando...</text>
-                }
-                else
-                {
-                    <text>🔔 ¡Terminó tu descanso en "@ringing.Name"! Volviendo a trabajar...</text>
-                }
-            }
-            else
-            {
-                <text>🔔 ¡Sonó la alarma "@ringing.Name"!</text>
-                @if (ringing.Player is null && !ringing.PlaybackDisposed)
+                @if (ringing.Player is null)
                 {
                     <span style="color:#669; font-style:italic;"> (esperando turno de audio)</span>
                 }
@@ -228,28 +218,29 @@ else
     // cada una espera su turno acá — nunca suenan dos mezcladas.
     private readonly Queue<(RingingAlarm Ringing, string Url, int? VolumePercent, bool IsPrimary)> _pendingAudio = new();
     private bool _audioSlotBusy;
-    // Bytes de audio ya descargados, por URL — evita volver a bajar de Cloudinary el mismo
-    // archivo en cada disparo de una alarma recurrente.
-    private readonly Dictionary<string, byte[]> _audioCache = new();
     private HubConnection? _hubConnection;
 
     private class RingingAlarm
     {
         public Guid AlarmId { get; set; }
         public string Name { get; set; } = string.Empty;
-        // Referencia al player real que quedó sonando — sin esto, Pausar/Detener solo
+        // Referencia al reproductor real que quedó sonando — sin esto, Pausar/Detener solo
         // reprogramaban la alarma del lado del servidor pero el audio seguía sonando solo.
-        public IAudioPlayer? Player { get; set; }
-        // Guard contra reentrada: en WinUI, Plugin.Maui.Audio dispara PlaybackEnded también al
-        // llamar Stop() manualmente (no solo al terminar solo), y Dispose() llama a Stop() por
-        // dentro — sin este guard, Dispose -> Stop -> PlaybackEnded -> Dispose (de nuevo) entra
-        // en loop infinito y revienta la pila (stack overflow, tira abajo el proceso entero).
-        public bool PlaybackDisposed { get; set; }
+        // ManagedAlarmAudio (Services/ManagedAlarmAudio.cs) trae su propio guard contra la
+        // reentrada de Plugin.Maui.Audio en WinUI (Dispose -> Stop -> PlaybackEnded -> Dispose
+        // de nuevo, que sin guard revienta la pila) — compartido con AlarmNotificationService
+        // para el audio "headless" cuando esta página no está abierta.
+        public ManagedAlarmAudio? Player { get; set; }
         // Ciclo automático trabajo/descanso (Pausa Activa habilitada): banner sin Pausar, chime
         // corto en vez del audio largo configurado, se autodescarta solo.
         public bool HasActiveBreak { get; set; }
         public string? PhaseJustEnded { get; set; } // "Work" | "Break"
     }
+
+    // Mismo texto que usa el toast nativo (NativeNotifications, vía AlarmNotificationService) —
+    // un solo lugar para la lógica del mensaje, no duplicada en los dos.
+    private static string GetRingingMessage(RingingAlarm ringing) =>
+        NativeNotifications.BuildRingingMessage(ringing.Name, ringing.HasActiveBreak, ringing.PhaseJustEnded);
 
     protected override async Task OnInitializedAsync()
     {
@@ -258,6 +249,10 @@ else
             Navigation.NavigateTo("/login", replace: true);
             return;
         }
+
+        // Mientras esta página está abierta, ella se encarga del audio real (cola de turnos,
+        // banner) — AlarmNotificationService se calla para no duplicar el sonido.
+        NotificationService.IsAlarmsPageActive = true;
 
         await LoadAlarmsAsync();
         await LoadMediaAsync();
@@ -321,6 +316,9 @@ else
                     PhaseJustEnded = payload.PhaseJustEnded
                 };
                 _ringingAlarms.Add(ringing);
+                // El toast nativo de Windows lo manda AlarmNotificationService (conexión propia,
+                // a nivel de toda la app) — no acá, para no duplicarlo mientras esta página está
+                // abierta (las dos conexiones reciben el mismo evento).
 
                 if (ringing.HasActiveBreak)
                 {
@@ -430,60 +428,31 @@ else
     }
 
     // Reproducción best-effort: un audio roto, sin red, o un formato no soportado no debe
-    // romper el banner de la alarma ni el resto del handler de SignalR.
+    // romper el banner de la alarma ni el resto del handler de SignalR. La mecánica real
+    // (descarga+caché, fix de seek, guard de stack overflow) vive en ManagedAlarmAudio —
+    // compartida con AlarmNotificationService para el audio "headless".
     private async Task PlayAlarmSoundAsync(RingingAlarm ringing, string url, bool isPrimary, int? volumePercent)
     {
-        var targetVolume = Math.Clamp((volumePercent ?? 100) / 100.0, 0.0, 1.0);
         try
         {
             // Si ya se apretó Pausar/Detener mientras esperábamos nuestro turno en cola, no
             // arrancar a sonar igual — ringing ya no está en la lista de alarmas sonando.
             if (!_ringingAlarms.Contains(ringing)) return;
 
-            // Cacheado en memoria por URL — la misma alarma vuelve a sonar con el mismo audio una
-            // y otra vez, y descargarlo de Cloudinary de nuevo en cada disparo era el segundo
-            // tramo del desfase que se notaba entre el aviso y el sonido real.
-            if (!_audioCache.TryGetValue(url, out var bytes))
+            var managed = new ManagedAlarmAudio();
+            managed.Ended += () =>
             {
-                using var http = new HttpClient();
-                bytes = await http.GetByteArrayAsync(url);
-                _audioCache[url] = bytes;
-            }
-
-            if (!_ringingAlarms.Contains(ringing)) return;
-
-            // MemoryStream nuevo en cada reproducción (aunque los bytes vengan de la caché): en
-            // WinUI el reproductor necesita envolver el stream como IRandomAccessStream, que
-            // exige soporte de seek (el stream de red no lo tiene, por eso bytes y no stream
-            // crudo). El stream se dispone recién cuando termina de sonar, no antes, porque el
-            // player lo sigue leyendo mientras reproduce.
-
-            var stream = new MemoryStream(bytes);
-            var player = AudioManager.CreatePlayer(stream);
-            player.PlaybackEnded += (_, _) =>
-            {
-                StopPlayback(ringing);
-                stream.Dispose();
+                _audioSlotBusy = false;
+                _ = PlayNextQueuedAudioAsync();
             };
-            ringing.Player = player;
-            StateHasChanged(); // saca el "(esperando turno de audio)" del banner ni bien arranca
 
-            if (isPrimary)
-            {
-                player.Volume = targetVolume;
-                player.Play();
-            }
-            else
-            {
-                player.Volume = 0;
-                player.Play();
-                for (var step = 1; step <= 10; step++)
+            await managed.PlayAsync(AudioManager, url, volumePercent, fadeIn: !isPrimary,
+                shouldContinue: () => _ringingAlarms.Contains(ringing),
+                onPlayerCreated: () =>
                 {
-                    await Task.Delay(200);
-                    if (!_ringingAlarms.Contains(ringing)) return;
-                    player.Volume = targetVolume * step / 10.0;
-                }
-            }
+                    ringing.Player = managed;
+                    StateHasChanged(); // saca "(esperando turno de audio)" ni bien arranca
+                });
         }
         catch
         {
@@ -678,17 +647,10 @@ else
     // Detener/Pausar del banner de "sonó la alarma" — a diferencia de Pausar/Dormir en la lista
     // (manuales, en cualquier momento), estos actúan sobre la alarma que efectivamente sonó.
     // Cada banner es independiente (ver _ringingAlarms) para el caso de dos alarmas cruzadas.
-    // Dispone el player una sola vez (ver comentario de PlaybackDisposed en RingingAlarm).
-    // Dispose() ya detiene la reproducción por dentro — no hace falta llamar Stop() aparte.
-    // Libera el turno de audio para que la siguiente en cola (si hay) pueda arrancar.
-    private void StopPlayback(RingingAlarm ringing)
-    {
-        if (ringing.PlaybackDisposed || ringing.Player is null) return;
-        ringing.PlaybackDisposed = true;
-        ringing.Player.Dispose();
-        _audioSlotBusy = false;
-        _ = PlayNextQueuedAudioAsync();
-    }
+    // ManagedAlarmAudio.Stop() ya es idempotente y dispara Ended (suscripto en
+    // PlayAlarmSoundAsync) para liberar _audioSlotBusy/avanzar la cola — un solo lugar para esa
+    // lógica, se dispare por acá o porque el audio terminó solo.
+    private static void StopPlayback(RingingAlarm ringing) => ringing.Player?.Stop();
 
     private async Task StopRingingAlarmAsync(RingingAlarm ringing)
     {
@@ -722,6 +684,7 @@ else
 
     public async ValueTask DisposeAsync()
     {
+        NotificationService.IsAlarmsPageActive = false;
         if (_hubConnection is not null)
             await _hubConnection.DisposeAsync();
     }

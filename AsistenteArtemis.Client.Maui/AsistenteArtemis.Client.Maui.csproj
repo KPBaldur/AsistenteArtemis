@@ -66,4 +66,10 @@
         <PackageReference Include="Plugin.Maui.Audio" Version="4.0.0" />
     </ItemGroup>
 
+    <!-- Solo para notificaciones toast nativas de Windows (ver Alarms.razor) — el paquete no
+         resuelve para net9.0-android, así que va condicionado al TFM de Windows. -->
+    <ItemGroup Condition="'$(TargetFramework)' == 'net9.0-windows10.0.19041.0'">
+        <PackageReference Include="CommunityToolkit.WinUI.Notifications" Version="7.1.2" />
+    </ItemGroup>
+
 </Project>
