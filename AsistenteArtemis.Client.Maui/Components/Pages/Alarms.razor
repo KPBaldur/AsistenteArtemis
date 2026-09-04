@@ -214,6 +214,9 @@ else
     // cada una espera su turno acá — nunca suenan dos mezcladas.
     private readonly Queue<(RingingAlarm Ringing, string Url, int? VolumePercent, bool IsPrimary)> _pendingAudio = new();
     private bool _audioSlotBusy;
+    // Bytes de audio ya descargados, por URL — evita volver a bajar de Cloudinary el mismo
+    // archivo en cada disparo de una alarma recurrente.
+    private readonly Dictionary<string, byte[]> _audioCache = new();
     private HubConnection? _hubConnection;
 
     private class RingingAlarm
@@ -371,14 +374,23 @@ else
             // arrancar a sonar igual — ringing ya no está en la lista de alarmas sonando.
             if (!_ringingAlarms.Contains(ringing)) return;
 
-            using var http = new HttpClient();
-            // MemoryStream, no el stream de red crudo: en WinUI el reproductor necesita envolver
-            // el stream como IRandomAccessStream, que exige soporte de seek (el stream de red no
-            // lo tiene). El stream se dispone recién cuando termina de sonar, no antes, porque
-            // el player lo sigue leyendo mientras reproduce.
-            var bytes = await http.GetByteArrayAsync(url);
+            // Cacheado en memoria por URL — la misma alarma vuelve a sonar con el mismo audio una
+            // y otra vez, y descargarlo de Cloudinary de nuevo en cada disparo era el segundo
+            // tramo del desfase que se notaba entre el aviso y el sonido real.
+            if (!_audioCache.TryGetValue(url, out var bytes))
+            {
+                using var http = new HttpClient();
+                bytes = await http.GetByteArrayAsync(url);
+                _audioCache[url] = bytes;
+            }
 
             if (!_ringingAlarms.Contains(ringing)) return;
+
+            // MemoryStream nuevo en cada reproducción (aunque los bytes vengan de la caché): en
+            // WinUI el reproductor necesita envolver el stream como IRandomAccessStream, que
+            // exige soporte de seek (el stream de red no lo tiene, por eso bytes y no stream
+            // crudo). El stream se dispone recién cuando termina de sonar, no antes, porque el
+            // player lo sigue leyendo mientras reproduce.
 
             var stream = new MemoryStream(bytes);
             var player = AudioManager.CreatePlayer(stream);

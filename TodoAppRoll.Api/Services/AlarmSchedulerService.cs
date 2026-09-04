@@ -15,7 +15,10 @@ namespace TodoAppRoll.Api.Services
     /// </summary>
     public class AlarmSchedulerService : BackgroundService
     {
-        private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(15);
+        // 15s original generaba un desfase notorio (hasta 15s, ~7.5s en promedio) entre la hora
+        // real de la alarma y el disparo — bajado a 3s: app personal de un solo usuario, el costo
+        // extra de consultar la DB más seguido no importa acá.
+        private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(3);
         private const int DefaultPomodoroMinutes = 25;
 
         // App personal de un solo usuario en Chile — hora fija en vez de manejar timezone por usuario.
