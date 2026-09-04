@@ -1,0 +1,113 @@
+@page "/identity"
+@inject IAssistantIdentityApiClient IdentityApi
+@inject AuthState AuthState
+@inject NavigationManager Navigation
+
+<h1>Identidad de Artemis</h1>
+
+@if (!AuthState.IsAuthenticated)
+{
+    <p>Redirigiendo a login...</p>
+}
+else if (_model is null)
+{
+    <p>Cargando...</p>
+}
+else
+{
+    <EditForm Model="_model" OnValidSubmit="SaveAsync">
+        <div class="form-group">
+            <label>Nombre</label>
+            <InputText class="form-control" @bind-Value="_model.Name" />
+        </div>
+        <div class="form-group">
+            <label>Tono</label>
+            <InputText class="form-control" @bind-Value="_model.Tone" placeholder="ej: sarcástico, formal, cercano..." />
+        </div>
+        <div class="form-group">
+            <label>Reglas de estilo</label>
+            <InputTextArea class="form-control" rows="6" @bind-Value="_model.StyleRules" />
+        </div>
+
+        @if (!string.IsNullOrEmpty(_error))
+        {
+            <p class="text-danger">@_error</p>
+        }
+        @if (_saved)
+        {
+            <p class="text-success">Guardado.</p>
+        }
+
+        <button type="submit" class="btn btn-primary" disabled="@_busy">Guardar</button>
+    </EditForm>
+
+    @if (_updatedAt.HasValue)
+    {
+        <p><small>Última actualización: @_updatedAt.Value.ToLocalTime().ToString("g")</small></p>
+    }
+}
+
+@code {
+    private FormModel? _model;
+    private DateTime? _updatedAt;
+    private string? _error;
+    private bool _busy;
+    private bool _saved;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (!AuthState.IsAuthenticated)
+        {
+            Navigation.NavigateTo("/login", replace: true);
+            return;
+        }
+
+        try
+        {
+            var identity = await IdentityApi.GetIdentityAsync();
+            _model = new FormModel { Name = identity.Name, Tone = identity.Tone, StyleRules = identity.StyleRules };
+            _updatedAt = identity.UpdatedAt;
+        }
+        catch (HttpRequestException)
+        {
+            _error = "No se pudo cargar la identidad.";
+            _model = new FormModel();
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        if (_model is null)
+            return;
+
+        _busy = true;
+        _saved = false;
+        try
+        {
+            var updated = await IdentityApi.SaveIdentityAsync(new AssistantIdentityUpdateDto
+            {
+                Name = _model.Name,
+                Tone = _model.Tone,
+                StyleRules = _model.StyleRules
+            });
+            _updatedAt = updated.UpdatedAt;
+            _saved = true;
+            _error = null;
+        }
+        catch (HttpRequestException ex)
+        {
+            _error = $"No se pudo guardar: {ex.Message}";
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private class FormModel
+    {
+        public string Name { get; set; } = string.Empty;
+        public string Tone { get; set; } = string.Empty;
+        public string StyleRules { get; set; } = string.Empty;
+    }
+}

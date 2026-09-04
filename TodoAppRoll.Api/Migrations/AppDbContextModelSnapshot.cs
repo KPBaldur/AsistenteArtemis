@@ -114,6 +114,9 @@ namespace TodoAppRoll.Api.Migrations
                     b.Property<Guid?>("AudioId")
                         .HasColumnType("uuid");
 
+                    b.Property<int>("DaysOfWeek")
+                        .HasColumnType("integer");
+
                     b.Property<int?>("DurationMinutes")
                         .HasColumnType("integer");
 
@@ -130,11 +133,23 @@ namespace TodoAppRoll.Api.Migrations
                     b.Property<DateTime?>("ScheduleAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<int?>("SnoozeMinutes")
+                        .HasColumnType("integer");
+
                     b.Property<int>("Type")
                         .HasColumnType("integer");
 
                     b.Property<Guid>("UserId")
                         .HasColumnType("uuid");
+
+                    b.Property<int?>("Volume")
+                        .HasColumnType("integer");
+
+                    b.Property<TimeOnly?>("WindowEnd")
+                        .HasColumnType("time without time zone");
+
+                    b.Property<TimeOnly?>("WindowStart")
+                        .HasColumnType("time without time zone");
 
                     b.HasKey("Id");
 

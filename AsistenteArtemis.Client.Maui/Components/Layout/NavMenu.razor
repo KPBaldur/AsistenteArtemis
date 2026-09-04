@@ -1,0 +1,65 @@
+@inject AuthState AuthState
+@implements IDisposable
+
+<div class="top-row ps-3 navbar navbar-dark">
+    <div class="container-fluid">
+        <a class="navbar-brand" href="/">AsistenteArtemis</a>
+    </div>
+</div>
+
+<input type="checkbox" title="Navigation menu" class="navbar-toggler" />
+
+<div class="nav-scrollable" onclick="document.querySelector('.navbar-toggler').click()">
+    <nav class="flex-column">
+        @if (AuthState.IsAuthenticated)
+        {
+            <div class="nav-item px-3">
+                <NavLink class="nav-link" href="/tasks">Tareas</NavLink>
+            </div>
+            <div class="nav-item px-3">
+                <NavLink class="nav-link" href="/alarms">Alarmas</NavLink>
+            </div>
+            <div class="nav-item px-3">
+                <NavLink class="nav-link" href="/alarms/upcoming">Próximas alarmas</NavLink>
+            </div>
+            <div class="nav-item px-3">
+                <NavLink class="nav-link" href="/notes">Notas</NavLink>
+            </div>
+            <div class="nav-item px-3">
+                <NavLink class="nav-link" href="/chat">Chat IA</NavLink>
+            </div>
+            <div class="nav-item px-3">
+                <NavLink class="nav-link" href="/identity">Identidad</NavLink>
+            </div>
+            <div class="nav-item px-3">
+                <NavLink class="nav-link" href="/monitor">Monitor</NavLink>
+            </div>
+            <div class="nav-item px-3">
+                <span class="nav-link">@AuthState.Username</span>
+            </div>
+        }
+        else
+        {
+            <div class="nav-item px-3">
+                <NavLink class="nav-link" href="/login">Iniciar sesión</NavLink>
+            </div>
+            <div class="nav-item px-3">
+                <NavLink class="nav-link" href="/register">Registrarse</NavLink>
+            </div>
+        }
+    </nav>
+</div>
+
+@code {
+    protected override void OnInitialized()
+    {
+        AuthState.Changed += OnAuthChanged;
+    }
+
+    private void OnAuthChanged() => InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        AuthState.Changed -= OnAuthChanged;
+    }
+}

@@ -33,6 +33,12 @@ namespace TodoAppRoll.Api.Controllers
 
         private const int DefaultPomodoroMinutes = 25;
 
+        // Ventanas que cruzan medianoche (ej. 22:00-02:00) no están soportadas en esta pasada.
+        private static bool IsValidWindow(TimeOnly? start, TimeOnly? end) =>
+            start.HasValue == end.HasValue && (!start.HasValue || start.Value < end!.Value);
+
+        private static int? ClampVolume(int? volume) => volume.HasValue ? Math.Clamp(volume.Value, 0, 100) : null;
+
         private static AlarmDto ToDto(Alarm a) => new AlarmDto
         {
             Id = a.Id,
@@ -42,7 +48,12 @@ namespace TodoAppRoll.Api.Controllers
             ScheduleAt = a.ScheduleAt,
             IsActive = a.IsActive,
             AudioId = a.AudioId,
-            ImageId = a.ImageId
+            ImageId = a.ImageId,
+            DaysOfWeek = a.DaysOfWeek,
+            WindowStart = a.WindowStart,
+            WindowEnd = a.WindowEnd,
+            SnoozeMinutes = a.SnoozeMinutes,
+            Volume = a.Volume
         };
 
         // GET: api/Alarm
@@ -66,13 +77,25 @@ namespace TodoAppRoll.Api.Controllers
             if (string.IsNullOrWhiteSpace(createDto.Name))
                 return BadRequest(new { message = "El nombre es obligatorio" });
 
+            if (!IsValidWindow(createDto.WindowStart, createDto.WindowEnd))
+                return BadRequest(new { message = "La ventana horaria necesita Desde y Hasta, con Desde antes que Hasta" });
+
             DateTime? scheduleAt;
             int? durationMinutes = null;
+            var daysOfWeek = AlarmDaysOfWeek.All;
+            TimeOnly? windowStart = null;
+            TimeOnly? windowEnd = null;
+            int? snoozeMinutes = null;
 
             if (createDto.Type == AlarmType.Pomodoro)
             {
                 durationMinutes = createDto.DurationMinutes is > 0 ? createDto.DurationMinutes : DefaultPomodoroMinutes;
                 scheduleAt = DateTime.UtcNow.AddMinutes(durationMinutes.Value);
+                daysOfWeek = createDto.DaysOfWeek is > AlarmDaysOfWeek.None ? createDto.DaysOfWeek.Value : AlarmDaysOfWeek.All;
+                windowStart = createDto.WindowStart;
+                windowEnd = createDto.WindowEnd;
+                // Opcional a propósito: sin pausa configurada, la alarma solo ofrece "Detener" al sonar.
+                snoozeMinutes = createDto.SnoozeMinutes is > 0 ? createDto.SnoozeMinutes : null;
             }
             else
             {
@@ -93,7 +116,12 @@ namespace TodoAppRoll.Api.Controllers
                 ScheduleAt = scheduleAt,
                 AudioId = createDto.AudioId,
                 ImageId = createDto.ImageId,
-                IsActive = true
+                IsActive = true,
+                DaysOfWeek = daysOfWeek,
+                WindowStart = windowStart,
+                WindowEnd = windowEnd,
+                SnoozeMinutes = snoozeMinutes,
+                Volume = ClampVolume(createDto.Volume)
             };
 
             _context.Alarms.Add(alarm);
@@ -111,9 +139,26 @@ namespace TodoAppRoll.Api.Controllers
 
             if (alarm == null) return NotFound();
 
+            if (!IsValidWindow(updateDto.WindowStart, updateDto.WindowEnd))
+                return BadRequest(new { message = "La ventana horaria necesita Desde y Hasta, con Desde antes que Hasta" });
+
             if (updateDto.Name != null) alarm.Name = updateDto.Name.Trim();
             if (updateDto.AudioId.HasValue) alarm.AudioId = updateDto.AudioId;
             if (updateDto.ImageId.HasValue) alarm.ImageId = updateDto.ImageId;
+            if (updateDto.DaysOfWeek.HasValue) alarm.DaysOfWeek = updateDto.DaysOfWeek.Value;
+            if (updateDto.Volume.HasValue) alarm.Volume = ClampVolume(updateDto.Volume);
+            if (updateDto.ClearSnoozeMinutes) alarm.SnoozeMinutes = null;
+            else if (updateDto.SnoozeMinutes is > 0) alarm.SnoozeMinutes = updateDto.SnoozeMinutes;
+            if (updateDto.ClearWindow)
+            {
+                alarm.WindowStart = null;
+                alarm.WindowEnd = null;
+            }
+            else if (updateDto.WindowStart.HasValue)
+            {
+                alarm.WindowStart = updateDto.WindowStart;
+                alarm.WindowEnd = updateDto.WindowEnd;
+            }
 
             var reactivating = updateDto.IsActive == true && !alarm.IsActive;
             var durationChanged = updateDto.DurationMinutes.HasValue && updateDto.DurationMinutes != alarm.DurationMinutes;
@@ -161,7 +206,7 @@ namespace TodoAppRoll.Api.Controllers
         public async Task<IActionResult> TriggerAlarm(Guid id)
         {
             var userId = GetUserId();
-            var alarm = await _context.Alarms.FirstOrDefaultAsync(a => a.Id == id && a.UserId == userId);
+            var alarm = await _context.Alarms.Include(a => a.Audio).FirstOrDefaultAsync(a => a.Id == id && a.UserId == userId);
 
             if (alarm == null) return NotFound();
 
@@ -172,7 +217,9 @@ namespace TodoAppRoll.Api.Controllers
                 name = alarm.Name,
                 type = alarm.Type.ToString(),
                 audioId = alarm.AudioId,
-                imageId = alarm.ImageId
+                imageId = alarm.ImageId,
+                audioUrl = alarm.Audio?.Url,
+                volume = alarm.Volume
             });
 
             return Ok(new { message = "Alarma disparada vía SignalR" });

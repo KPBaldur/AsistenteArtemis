@@ -1,0 +1,185 @@
+@page "/chat"
+@implements IDisposable
+@inject IAiChatApiClient ChatApi
+@inject AuthState AuthState
+@inject NavigationManager Navigation
+
+<h1>Chat con Artemis</h1>
+
+@if (!AuthState.IsAuthenticated)
+{
+    <p>Redirigiendo a login...</p>
+}
+else
+{
+    @if (!string.IsNullOrEmpty(_error))
+    {
+        <p class="text-danger">@_error</p>
+    }
+
+    <button class="btn btn-primary" @onclick="CreateSessionAsync">Nueva conversación</button>
+
+    <div style="display:flex; gap:1em; margin-top:1em;">
+        <div style="flex:0 0 25%;">
+            @if (_sessions is null)
+            {
+                <p>Cargando...</p>
+            }
+            else
+            {
+                <ul class="list-group">
+                    @foreach (var session in _sessions)
+                    {
+                        <li class="list-group-item @(session.Id == _selectedSessionId ? "active" : "")" @onclick="() => SelectSessionAsync(session.Id)" style="cursor:pointer;">
+                            @session.Title
+                        </li>
+                    }
+                </ul>
+            }
+        </div>
+
+        <div style="flex:1;">
+            @if (_selectedSessionId is null)
+            {
+                <p>Elegí una conversación o creá una nueva.</p>
+            }
+            else
+            {
+                <div style="max-height:50vh; overflow-y:auto; border:1px solid #ddd; padding:0.5em;">
+                    @if (_messages is null)
+                    {
+                        <p>Cargando mensajes...</p>
+                    }
+                    else
+                    {
+                        @foreach (var message in _messages)
+                        {
+                            <div style="margin-bottom:0.5em; text-align:@(message.Role == "user" ? "right" : "left");">
+                                <span style="display:inline-block; padding:0.4em 0.8em; border-radius:0.8em; background:@(message.Role == "user" ? "#d6e8ff" : "#eee");">
+                                    @message.Content
+                                </span>
+                            </div>
+                        }
+                    }
+                    @if (_sending)
+                    {
+                        <p><em>Artemis está pensando...</em></p>
+                    }
+                </div>
+
+                <EditForm Model="_draft" OnValidSubmit="SendAsync" class="mt-2">
+                    <InputText class="form-control" placeholder="Escribí un mensaje..." @bind-Value="_draft.Content" disabled="@_sending" />
+                    <button type="submit" class="btn btn-primary mt-1" disabled="@_sending">Enviar</button>
+                </EditForm>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    private List<ChatSessionDto>? _sessions;
+    private List<AiMessageDto>? _messages;
+    private Guid? _selectedSessionId;
+    private readonly DraftModel _draft = new();
+    private string? _error;
+    private bool _sending;
+    // Navigating to another tab while SendAsync is awaiting the Brain disposes this component
+    // instance — without this guard, the response lands and mutates state / calls
+    // StateHasChanged on a component nobody can see anymore, and the error (or reply) that was
+    // in flight is silently lost instead of showing up when the user comes back.
+    private bool _disposed;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (!AuthState.IsAuthenticated)
+        {
+            Navigation.NavigateTo("/login", replace: true);
+            return;
+        }
+
+        await LoadSessionsAsync();
+    }
+
+    private async Task LoadSessionsAsync()
+    {
+        try
+        {
+            _sessions = await ChatApi.GetSessionsAsync();
+            _error = null;
+        }
+        catch (HttpRequestException)
+        {
+            _error = "No se pudieron cargar las conversaciones.";
+        }
+    }
+
+    private async Task CreateSessionAsync()
+    {
+        try
+        {
+            var session = await ChatApi.CreateSessionAsync(new ChatSessionCreateDto());
+            await LoadSessionsAsync();
+            await SelectSessionAsync(session.Id);
+        }
+        catch (HttpRequestException ex)
+        {
+            _error = $"No se pudo crear la conversación: {ex.Message}";
+        }
+    }
+
+    private async Task SelectSessionAsync(Guid id)
+    {
+        _selectedSessionId = id;
+        _messages = null;
+        try
+        {
+            _messages = await ChatApi.GetMessagesAsync(id);
+            _error = null;
+        }
+        catch (HttpRequestException)
+        {
+            _error = "No se pudieron cargar los mensajes.";
+        }
+    }
+
+    private async Task SendAsync()
+    {
+        if (_selectedSessionId is null || string.IsNullOrWhiteSpace(_draft.Content))
+            return;
+
+        var content = _draft.Content;
+        _draft.Content = string.Empty;
+        _sending = true;
+        _error = null;
+        try
+        {
+            var result = await ChatApi.SendMessageAsync(_selectedSessionId.Value, new SendMessageDto { Content = content });
+            if (_disposed) return;
+            _messages ??= [];
+            _messages.Add(result.UserMessage);
+            _messages.Add(result.AssistantMessage);
+        }
+        catch (ChatBrainException ex)
+        {
+            // Real error from the API/Brain — show it as-is instead of a generic failure.
+            if (_disposed) return;
+            _error = ex.Message;
+        }
+        catch (HttpRequestException ex)
+        {
+            if (_disposed) return;
+            _error = $"No se pudo enviar el mensaje: {ex.Message}";
+        }
+        finally
+        {
+            if (!_disposed) _sending = false;
+        }
+    }
+
+    public void Dispose() => _disposed = true;
+
+    private class DraftModel
+    {
+        public string Content { get; set; } = string.Empty;
+    }
+}

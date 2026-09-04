@@ -1,0 +1,24 @@
+@page "/"
+@inject AuthState AuthState
+@inject TokenStore TokenStore
+@inject NavigationManager Navigation
+
+@code {
+    protected override async Task OnInitializedAsync()
+    {
+        // Restore the session on process restart: a stored refresh token means we were logged
+        // in before. We don't re-validate it here — AuthDelegatingHandler refreshes on demand
+        // the first time a call comes back 401, and logs out for real if that refresh fails.
+        if (!AuthState.IsAuthenticated)
+        {
+            var refreshToken = await TokenStore.GetRefreshTokenAsync();
+            var username = TokenStore.GetSavedUsername();
+            if (!string.IsNullOrEmpty(refreshToken) && !string.IsNullOrEmpty(username))
+            {
+                AuthState.SetAuthenticated(username);
+            }
+        }
+
+        Navigation.NavigateTo(AuthState.IsAuthenticated ? "/tasks" : "/login", replace: true);
+    }
+}

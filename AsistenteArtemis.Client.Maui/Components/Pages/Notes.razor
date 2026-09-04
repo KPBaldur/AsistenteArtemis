@@ -1,0 +1,205 @@
+@page "/notes"
+@inject INoteApiClient NoteApi
+@inject AuthState AuthState
+@inject NavigationManager Navigation
+
+<h1>Notas</h1>
+
+@if (!AuthState.IsAuthenticated)
+{
+    <p>Redirigiendo a login...</p>
+}
+else
+{
+    @if (!string.IsNullOrEmpty(_error))
+    {
+        <p class="text-danger">@_error</p>
+    }
+
+    <button class="btn btn-primary" @onclick="StartNewNote">Nueva nota</button>
+
+    <div style="display:flex; gap:1em; margin-top:1em;">
+        <div style="flex:0 0 30%;">
+            @if (_notes is null)
+            {
+                <p>Cargando...</p>
+            }
+            else
+            {
+                <ul class="list-group">
+                    @foreach (var note in _notes)
+                    {
+                        <li class="list-group-item @(note.Id == _selected?.Id ? "active" : "")" @onclick="() => SelectNoteAsync(note.Id)" style="cursor:pointer;">
+                            @note.Title
+                            <br />
+                            <small>@note.UpdatedAt.ToLocalTime().ToString("g")</small>
+                        </li>
+                    }
+                </ul>
+            }
+        </div>
+
+        <div style="flex:1;">
+            @if (_editing is not null)
+            {
+                <EditForm Model="_editing" OnValidSubmit="SaveNoteAsync">
+                    <div class="form-group">
+                        <InputText class="form-control" placeholder="Título" @bind-Value="_editing.Title" />
+                    </div>
+                    <div class="form-group">
+                        <InputTextArea class="form-control" rows="10" placeholder="Contenido — usá [[Título de otra nota]] para enlazarla" @bind-Value="_editing.Content" />
+                    </div>
+                    <button type="submit" class="btn btn-primary" disabled="@_busy">Guardar</button>
+                    @if (_selected is not null)
+                    {
+                        <button type="button" class="btn btn-outline-danger" @onclick="DeleteSelectedAsync">Borrar</button>
+                    }
+                </EditForm>
+
+                @if (_selected is not null)
+                {
+                    <div style="margin-top:1em;">
+                        <strong>Enlaces salientes:</strong>
+                        @if (_selected.OutgoingLinks.Count == 0)
+                        {
+                            <span> ninguno</span>
+                        }
+                        else
+                        {
+                            <ul>
+                                @foreach (var link in _selected.OutgoingLinks)
+                                {
+                                    <li>@link.Title</li>
+                                }
+                            </ul>
+                        }
+                        <strong>Enlaces entrantes:</strong>
+                        @if (_selected.IncomingLinks.Count == 0)
+                        {
+                            <span> ninguno</span>
+                        }
+                        else
+                        {
+                            <ul>
+                                @foreach (var link in _selected.IncomingLinks)
+                                {
+                                    <li>@link.Title</li>
+                                }
+                            </ul>
+                        }
+                    </div>
+                }
+            }
+            else
+            {
+                <p>Elegí una nota de la lista o creá una nueva.</p>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    private List<NoteDto>? _notes;
+    private NoteDto? _selected;
+    private NoteFormModel? _editing;
+    private string? _error;
+    private bool _busy;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (!AuthState.IsAuthenticated)
+        {
+            Navigation.NavigateTo("/login", replace: true);
+            return;
+        }
+
+        await LoadNotesAsync();
+    }
+
+    private async Task LoadNotesAsync()
+    {
+        try
+        {
+            _notes = await NoteApi.GetNotesAsync();
+            _error = null;
+        }
+        catch (HttpRequestException)
+        {
+            _error = "No se pudieron cargar las notas.";
+        }
+    }
+
+    private void StartNewNote()
+    {
+        _selected = null;
+        _editing = new NoteFormModel();
+    }
+
+    private Task SelectNoteAsync(Guid id)
+    {
+        _selected = _notes?.FirstOrDefault(n => n.Id == id);
+        if (_selected is null)
+            return Task.CompletedTask;
+
+        _editing = new NoteFormModel { Title = _selected.Title, Content = _selected.Content };
+        return Task.CompletedTask;
+    }
+
+    private async Task SaveNoteAsync()
+    {
+        if (_editing is null || string.IsNullOrWhiteSpace(_editing.Title))
+            return;
+
+        _busy = true;
+        try
+        {
+            if (_selected is null)
+            {
+                var created = await NoteApi.CreateNoteAsync(new NoteCreateDto
+                {
+                    Title = _editing.Title,
+                    Content = _editing.Content
+                });
+                await LoadNotesAsync();
+                await SelectNoteAsync(created.Id);
+            }
+            else
+            {
+                await NoteApi.UpdateNoteAsync(_selected.Id, new NoteUpdateDto
+                {
+                    Title = _editing.Title,
+                    Content = _editing.Content
+                });
+                var keepId = _selected.Id;
+                await LoadNotesAsync();
+                await SelectNoteAsync(keepId);
+            }
+            _error = null;
+        }
+        catch (HttpRequestException ex)
+        {
+            _error = $"No se pudo guardar la nota: {ex.Message}";
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task DeleteSelectedAsync()
+    {
+        if (_selected is null)
+            return;
+
+        await NoteApi.DeleteNoteAsync(_selected.Id);
+        _selected = null;
+        _editing = null;
+        await LoadNotesAsync();
+    }
+
+    private class NoteFormModel
+    {
+        public string Title { get; set; } = string.Empty;
+        public string Content { get; set; } = string.Empty;
+    }
+}

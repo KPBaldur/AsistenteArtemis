@@ -1,0 +1,247 @@
+@page "/monitor"
+@using Microsoft.AspNetCore.SignalR.Client
+@implements IAsyncDisposable
+@inject IMonitorApiClient MonitorApi
+@inject TokenStore TokenStore
+@inject AuthState AuthState
+@inject NavigationManager Navigation
+
+<h1>Monitor de servidores</h1>
+
+@if (!AuthState.IsAuthenticated)
+{
+    <p>Redirigiendo a login...</p>
+}
+else
+{
+    <p>
+        Conexión en vivo:
+        @if (_hubConnected)
+        {
+            <span style="color:green;">conectada</span>
+        }
+        else
+        {
+            <span style="color:#a60;">conectando...</span>
+        }
+    </p>
+
+    <EditForm Model="_newMonitor" OnValidSubmit="CreateMonitorAsync">
+        <div class="form-group">
+            <InputText class="form-control" placeholder="Nombre" @bind-Value="_newMonitor.Name" />
+        </div>
+        <div class="form-group">
+            <InputSelect class="form-control" @bind-Value="_newMonitor.Type">
+                @foreach (var type in Enum.GetValues<MonitorCheckType>())
+                {
+                    <option value="@type">@type</option>
+                }
+            </InputSelect>
+        </div>
+        <div class="form-group">
+            <InputText class="form-control" placeholder="URL o connection string" @bind-Value="_newMonitor.Target" />
+        </div>
+        <button type="submit" class="btn btn-primary" disabled="@_busy">Agregar monitor</button>
+    </EditForm>
+
+    @if (!string.IsNullOrEmpty(_error))
+    {
+        <p class="text-danger">@_error</p>
+    }
+
+    @if (_monitors is null)
+    {
+        <p>Cargando...</p>
+    }
+    else if (_monitors.Count == 0)
+    {
+        <p>No hay monitores todavía.</p>
+    }
+    else
+    {
+        <ul class="list-group">
+            @foreach (var monitor in _monitors)
+            {
+                <li class="list-group-item">
+                    <span style="display:inline-block; width:0.8em; height:0.8em; border-radius:50%; background:@StatusColor(monitor.LastStatus); margin-right:0.5em;"></span>
+                    <strong>@monitor.Name</strong> — @monitor.Type — @monitor.Target
+                    <span> (@monitor.LastStatus)</span>
+                    @if (monitor.LastCheckedAt.HasValue)
+                    {
+                        <span> · último chequeo: @monitor.LastCheckedAt.Value.ToLocalTime().ToString("g")</span>
+                    }
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => ToggleHistoryAsync(monitor.Id)">Historial</button>
+                    <button class="btn btn-sm btn-outline-danger float-end" @onclick="() => DeleteMonitorAsync(monitor.Id)">Borrar</button>
+
+                    @if (_historyByMonitor.TryGetValue(monitor.Id, out var history))
+                    {
+                        <ul style="margin-top:0.5em;">
+                            @foreach (var entry in history)
+                            {
+                                <li>@entry.CheckedAt.ToLocalTime().ToString("g") — @entry.Status @(entry.ResponseTimeMs.HasValue ? $"({entry.ResponseTimeMs}ms)" : "") @entry.ErrorMessage</li>
+                            }
+                        </ul>
+                    }
+                </li>
+            }
+        </ul>
+    }
+}
+
+@code {
+    private List<MonitorDto>? _monitors;
+    private readonly MonitorFormModel _newMonitor = new();
+    private readonly Dictionary<Guid, List<MonitorCheckResultDto>> _historyByMonitor = new();
+    private string? _error;
+    private bool _busy;
+    private bool _hubConnected;
+    private HubConnection? _hubConnection;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (!AuthState.IsAuthenticated)
+        {
+            Navigation.NavigateTo("/login", replace: true);
+            return;
+        }
+
+        await LoadMonitorsAsync();
+        await ConnectHubAsync();
+    }
+
+    private async Task LoadMonitorsAsync()
+    {
+        try
+        {
+            _monitors = await MonitorApi.GetMonitorsAsync();
+            _error = null;
+        }
+        catch (HttpRequestException)
+        {
+            _error = "No se pudieron cargar los monitores.";
+        }
+    }
+
+    private async Task ConnectHubAsync()
+    {
+        _hubConnection = new HubConnectionBuilder()
+            .WithUrl($"{ApiConfig.HubBaseUrl}/hubs/monitors", options =>
+            {
+                options.AccessTokenProvider = () => TokenStore.GetAccessTokenAsync();
+            })
+            .WithAutomaticReconnect()
+            .Build();
+
+        _hubConnection.On<MonitorStatusChangedPayload>("MonitorStatusChanged", payload =>
+        {
+            InvokeAsync(() =>
+            {
+                ApplyStatusUpdate(payload);
+                StateHasChanged();
+            });
+        });
+
+        _hubConnection.Reconnected += _ => { _hubConnected = true; return InvokeAsync(StateHasChanged); };
+        _hubConnection.Reconnecting += _ => { _hubConnected = false; return InvokeAsync(StateHasChanged); };
+        _hubConnection.Closed += _ => { _hubConnected = false; return InvokeAsync(StateHasChanged); };
+
+        try
+        {
+            await _hubConnection.StartAsync();
+            _hubConnected = true;
+        }
+        catch (HttpRequestException)
+        {
+            _hubConnected = false;
+            _error = "No se pudo conectar el estado en vivo del monitor (¿la API está corriendo?).";
+        }
+    }
+
+    private void ApplyStatusUpdate(MonitorStatusChangedPayload payload)
+    {
+        var monitor = _monitors?.FirstOrDefault(m => m.Id == payload.MonitorId);
+        if (monitor is null)
+            return;
+
+        // Status travels as a string name here (unlike the REST DTO's int) — see MonitorDtos.cs.
+        if (Enum.TryParse<MonitorStatus>(payload.Status, out var status))
+            monitor.LastStatus = status;
+
+        monitor.LastCheckedAt = payload.CheckedAt;
+        monitor.LastResponseTimeMs = payload.ResponseTimeMs;
+        monitor.LastErrorMessage = payload.ErrorMessage;
+    }
+
+    private async Task CreateMonitorAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_newMonitor.Name) || string.IsNullOrWhiteSpace(_newMonitor.Target))
+            return;
+
+        _busy = true;
+        try
+        {
+            await MonitorApi.CreateMonitorAsync(new MonitorCreateDto
+            {
+                Name = _newMonitor.Name,
+                Type = _newMonitor.Type,
+                Target = _newMonitor.Target
+            });
+            _newMonitor.Name = string.Empty;
+            _newMonitor.Target = string.Empty;
+            await LoadMonitorsAsync();
+        }
+        catch (HttpRequestException ex)
+        {
+            _error = $"No se pudo crear el monitor: {ex.Message}";
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task DeleteMonitorAsync(Guid id)
+    {
+        await MonitorApi.DeleteMonitorAsync(id);
+        _historyByMonitor.Remove(id);
+        await LoadMonitorsAsync();
+    }
+
+    private async Task ToggleHistoryAsync(Guid id)
+    {
+        if (_historyByMonitor.ContainsKey(id))
+        {
+            _historyByMonitor.Remove(id);
+            return;
+        }
+
+        try
+        {
+            _historyByMonitor[id] = await MonitorApi.GetHistoryAsync(id);
+        }
+        catch (HttpRequestException ex)
+        {
+            _error = $"No se pudo cargar el historial: {ex.Message}";
+        }
+    }
+
+    private static string StatusColor(MonitorStatus status) => status switch
+    {
+        MonitorStatus.Up => "green",
+        MonitorStatus.Down => "red",
+        _ => "gray"
+    };
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_hubConnection is not null)
+            await _hubConnection.DisposeAsync();
+    }
+
+    private class MonitorFormModel
+    {
+        public string Name { get; set; } = string.Empty;
+        public MonitorCheckType Type { get; set; } = MonitorCheckType.HttpPing;
+        public string Target { get; set; } = string.Empty;
+    }
+}

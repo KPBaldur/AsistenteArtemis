@@ -128,6 +128,28 @@ namespace TodoAppRoll.Api.Controllers
             return NoContent();
         }
 
+        // PUT: api/Task/{id}/alarm — separado del PUT genérico porque un AlarmId en null ahí
+        // es indistinguible de "no tocar"; acá null siempre significa desvincular.
+        [HttpPut("{id}/alarm")]
+        public async Task<IActionResult> UpdateTaskAlarm(Guid id, TaskAlarmUpdateDto dto)
+        {
+            var userId = GetUserId();
+            var task = await _context.Tasks.FirstOrDefaultAsync(t => t.Id == id && t.UserId == userId);
+
+            if (task == null) return NotFound();
+
+            if (dto.AlarmId.HasValue)
+            {
+                var alarm = await _context.Alarms.FirstOrDefaultAsync(a => a.Id == dto.AlarmId.Value && a.UserId == userId);
+                if (alarm == null) return BadRequest(new { message = "La alarma no existe" });
+                if (alarm.Type != AlarmType.Pomodoro) return BadRequest(new { message = "Solo alarmas Pomodoro se pueden vincular a una tarea" });
+            }
+
+            task.AlarmId = dto.AlarmId;
+            await _context.SaveChangesAsync();
+            return NoContent();
+        }
+
         // DELETE: api/Task/{id}
         [HttpDelete("{id}")]
         public async Task<IActionResult> DeleteTask(Guid id)

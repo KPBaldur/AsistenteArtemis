@@ -1,0 +1,63 @@
+@page "/register"
+@inject IAuthApiClient AuthApi
+@inject NavigationManager Navigation
+
+<h1>Crear cuenta</h1>
+
+<EditForm Model="_model" OnValidSubmit="SubmitAsync">
+    <div class="form-group">
+        <label>Usuario</label>
+        <InputText class="form-control" @bind-Value="_model.Username" />
+    </div>
+    <div class="form-group">
+        <label>Email</label>
+        <InputText class="form-control" @bind-Value="_model.Email" />
+    </div>
+    <div class="form-group">
+        <label>Contraseña</label>
+        <InputText class="form-control" type="password" @bind-Value="_model.Password" />
+    </div>
+
+    @if (!string.IsNullOrEmpty(_error))
+    {
+        <p class="text-danger">@_error</p>
+    }
+    @if (_done)
+    {
+        <p class="text-success">Cuenta creada. Ya podés iniciar sesión.</p>
+    }
+
+    <button type="submit" class="btn btn-primary" disabled="@_busy">Registrarme</button>
+</EditForm>
+
+<p><a href="/login">Ya tengo cuenta</a></p>
+
+@code {
+    private readonly RegisterRequest _model = new();
+    private string? _error;
+    private bool _busy;
+    private bool _done;
+
+    private async Task SubmitAsync()
+    {
+        _busy = true;
+        _error = null;
+        _done = false;
+        try
+        {
+            // Register does NOT log the user in — the API returns only the created user, no
+            // tokens (see AuthController.Register). Send them to Login on success.
+            await AuthApi.RegisterAsync(_model);
+            _done = true;
+            Navigation.NavigateTo("/login", replace: true);
+        }
+        catch (HttpRequestException)
+        {
+            _error = "No se pudo crear la cuenta (usuario/email ya existe, o datos inválidos).";
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

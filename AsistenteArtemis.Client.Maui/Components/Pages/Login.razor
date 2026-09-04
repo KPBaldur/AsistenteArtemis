@@ -1,0 +1,54 @@
+@page "/login"
+@inject IAuthApiClient AuthApi
+@inject TokenStore TokenStore
+@inject AuthState AuthState
+@inject NavigationManager Navigation
+
+<h1>Iniciar sesión</h1>
+
+<EditForm Model="_model" OnValidSubmit="SubmitAsync">
+    <div class="form-group">
+        <label>Usuario</label>
+        <InputText class="form-control" @bind-Value="_model.Username" />
+    </div>
+    <div class="form-group">
+        <label>Contraseña</label>
+        <InputText class="form-control" type="password" @bind-Value="_model.Password" />
+    </div>
+
+    @if (!string.IsNullOrEmpty(_error))
+    {
+        <p class="text-danger">@_error</p>
+    }
+
+    <button type="submit" class="btn btn-primary" disabled="@_busy">Entrar</button>
+</EditForm>
+
+<p><a href="/register">¿No tenés cuenta? Registrate</a></p>
+
+@code {
+    private readonly LoginRequest _model = new();
+    private string? _error;
+    private bool _busy;
+
+    private async Task SubmitAsync()
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            var auth = await AuthApi.LoginAsync(_model);
+            await TokenStore.SaveSessionAsync(auth.Token, auth.RefreshToken, auth.User.Username);
+            AuthState.SetAuthenticated(auth.User.Username);
+            Navigation.NavigateTo("/tasks", replace: true);
+        }
+        catch (HttpRequestException)
+        {
+            _error = "Credenciales inválidas.";
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

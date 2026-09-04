@@ -13,6 +13,13 @@ namespace TodoAppRoll.Api.Models.Entities
         public DateTime? ScheduleAt { get; set; } // Para DateTime
         public bool IsActive { get; set; } = true;
 
+        // Para Pomodoro: restricción opcional de días/horario (null en WindowStart/WindowEnd = suena todo el tiempo)
+        public AlarmDaysOfWeek DaysOfWeek { get; set; } = AlarmDaysOfWeek.All;
+        public TimeOnly? WindowStart { get; set; }
+        public TimeOnly? WindowEnd { get; set; }
+        public int? SnoozeMinutes { get; set; } // Minutos que pospone el botón "Pausar" al sonar
+        public int? Volume { get; set; } // 0-100, null = volumen máximo
+
         // Personalización Multimedia
         public Guid? AudioId { get; set; }
         public virtual Media? Audio { get; set; }

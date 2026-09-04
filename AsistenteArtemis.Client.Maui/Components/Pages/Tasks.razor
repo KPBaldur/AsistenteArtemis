@@ -1,0 +1,258 @@
+@page "/tasks"
+@inject ITaskApiClient TaskApi
+@inject IAlarmApiClient AlarmApi
+@inject IAuthApiClient AuthApi
+@inject TokenStore TokenStore
+@inject AuthState AuthState
+@inject NavigationManager Navigation
+
+<h1>Tareas</h1>
+
+@if (!AuthState.IsAuthenticated)
+{
+    <p>Redirigiendo a login...</p>
+}
+else
+{
+    <EditForm Model="_newTask" OnValidSubmit="CreateTaskAsync">
+        <div class="form-group">
+            <InputText class="form-control" placeholder="Título de la tarea" @bind-Value="_newTask.Title" />
+        </div>
+        <div class="form-group">
+            <InputText class="form-control" placeholder="Descripción (opcional)" @bind-Value="_newTask.Description" />
+        </div>
+        <div class="form-group">
+            <InputSelect class="form-control" @bind-Value="_newTask.Priority">
+                @foreach (var priority in Enum.GetValues<TaskPriority>())
+                {
+                    <option value="@priority">@priority</option>
+                }
+            </InputSelect>
+        </div>
+        <button type="submit" class="btn btn-primary" disabled="@_busy">Agregar tarea</button>
+    </EditForm>
+
+    @if (!string.IsNullOrEmpty(_error))
+    {
+        <p class="text-danger">@_error</p>
+    }
+
+    @if (_tasks is null)
+    {
+        <p>Cargando...</p>
+    }
+    else if (_tasks.Count == 0)
+    {
+        <p>No hay tareas todavía.</p>
+    }
+    else
+    {
+        <ul class="list-group">
+            @foreach (var task in _tasks)
+            {
+                <li class="list-group-item">
+                    <div>
+                        <strong>@task.Title</strong> — @task.Priority
+                        <button class="btn btn-sm btn-outline-danger float-end" @onclick="() => DeleteTaskAsync(task.Id)">Borrar</button>
+                    </div>
+                    @if (!string.IsNullOrEmpty(task.Description))
+                    {
+                        <div>@task.Description</div>
+                    }
+                    <div>
+                        Estado:
+                        <select value="@task.Status" @onchange="e => ChangeStatusAsync(task, e.Value?.ToString())">
+                            @foreach (var status in Enum.GetValues<TaskStatus>())
+                            {
+                                <option value="@status">@status</option>
+                            }
+                        </select>
+                    </div>
+                    <div>
+                        Recordatorio:
+                        @{ var linkedAlarm = task.AlarmId.HasValue ? _pomodoroAlarms?.FirstOrDefault(a => a.Id == task.AlarmId) : null; }
+                        @if (linkedAlarm is not null)
+                        {
+                            <span>@linkedAlarm.Name (cada @linkedAlarm.DurationMinutes min)</span>
+                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => UnlinkAlarmAsync(task)">Quitar</button>
+                        }
+                        else if (_pomodoroAlarms is { Count: > 0 })
+                        {
+                            <select @onchange="e => LinkAlarmAsync(task, e.Value?.ToString())">
+                                <option value="">(elegir alarma Pomodoro)</option>
+                                @foreach (var alarm in _pomodoroAlarms)
+                                {
+                                    <option value="@alarm.Id">@alarm.Name</option>
+                                }
+                            </select>
+                        }
+                        else
+                        {
+                            <span class="text-muted">Sin alarmas Pomodoro creadas todavía</span>
+                        }
+                    </div>
+
+                    <ul>
+                        @foreach (var subtask in task.Subtasks)
+                        {
+                            <li>
+                                <input type="checkbox" checked="@subtask.IsDone" @onchange="() => ToggleSubtaskAsync(task, subtask)" />
+                                @subtask.Title
+                            </li>
+                        }
+                    </ul>
+                    <div class="input-group input-group-sm">
+                        <input class="form-control" placeholder="Nueva subtarea" @bind="_newSubtaskTitles[task.Id]" />
+                        <button class="btn btn-outline-secondary" @onclick="() => AddSubtaskAsync(task)">Agregar</button>
+                    </div>
+                </li>
+            }
+        </ul>
+    }
+
+    <button class="btn btn-link" @onclick="LogoutAsync">Cerrar sesión</button>
+}
+
+@code {
+    private List<TaskDto>? _tasks;
+    private List<AlarmDto>? _pomodoroAlarms;
+    private readonly TaskCreateDto _newTask = new();
+    private readonly Dictionary<Guid, string> _newSubtaskTitles = new();
+    private string? _error;
+    private bool _busy;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (!AuthState.IsAuthenticated)
+        {
+            Navigation.NavigateTo("/login", replace: true);
+            return;
+        }
+
+        await LoadTasksAsync();
+        await LoadPomodoroAlarmsAsync();
+    }
+
+    private async Task LoadPomodoroAlarmsAsync()
+    {
+        try
+        {
+            var alarms = await AlarmApi.GetAlarmsAsync();
+            _pomodoroAlarms = alarms.Where(a => a.Type == AlarmType.Pomodoro).ToList();
+        }
+        catch (HttpRequestException)
+        {
+            // No bloquea el resto de la pantalla — simplemente no se podrá vincular una alarma.
+        }
+    }
+
+    private async Task LinkAlarmAsync(TaskDto task, string? alarmIdText)
+    {
+        if (string.IsNullOrEmpty(alarmIdText) || !Guid.TryParse(alarmIdText, out var alarmId))
+            return;
+
+        await TaskApi.LinkAlarmAsync(task.Id, alarmId);
+        await LoadTasksAsync();
+    }
+
+    private async Task UnlinkAlarmAsync(TaskDto task)
+    {
+        await TaskApi.LinkAlarmAsync(task.Id, null);
+        await LoadTasksAsync();
+    }
+
+    private async Task LoadTasksAsync()
+    {
+        try
+        {
+            _tasks = await TaskApi.GetTasksAsync();
+            // The "new subtask" input for each row binds into this dictionary by task id — it
+            // must have an entry before the row renders, or the indexer throws KeyNotFoundException.
+            foreach (var task in _tasks)
+            {
+                if (!_newSubtaskTitles.ContainsKey(task.Id))
+                    _newSubtaskTitles[task.Id] = string.Empty;
+            }
+            _error = null;
+        }
+        catch (HttpRequestException)
+        {
+            _error = "No se pudieron cargar las tareas.";
+        }
+    }
+
+    private async Task CreateTaskAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_newTask.Title))
+            return;
+
+        _busy = true;
+        try
+        {
+            await TaskApi.CreateTaskAsync(_newTask);
+            _newTask.Title = string.Empty;
+            _newTask.Description = string.Empty;
+            await LoadTasksAsync();
+        }
+        catch (HttpRequestException)
+        {
+            _error = "No se pudo crear la tarea.";
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task ChangeStatusAsync(TaskDto task, string? newStatus)
+    {
+        if (newStatus is null || !Enum.TryParse<TaskStatus>(newStatus, out var status))
+            return;
+
+        await TaskApi.UpdateTaskAsync(task.Id, new TaskUpdateDto { Status = status });
+        await LoadTasksAsync();
+    }
+
+    private async Task DeleteTaskAsync(Guid id)
+    {
+        await TaskApi.DeleteTaskAsync(id);
+        await LoadTasksAsync();
+    }
+
+    private async Task AddSubtaskAsync(TaskDto task)
+    {
+        if (!_newSubtaskTitles.TryGetValue(task.Id, out var title) || string.IsNullOrWhiteSpace(title))
+            return;
+
+        await TaskApi.AddSubtaskAsync(task.Id, new SubtaskCreateDto { Title = title, Order = task.Subtasks.Count });
+        _newSubtaskTitles[task.Id] = string.Empty;
+        await LoadTasksAsync();
+    }
+
+    private async Task ToggleSubtaskAsync(TaskDto task, SubtaskDto subtask)
+    {
+        await TaskApi.ToggleSubtaskAsync(subtask.Id);
+        await LoadTasksAsync();
+    }
+
+    private async Task LogoutAsync()
+    {
+        var accessToken = await TokenStore.GetAccessTokenAsync();
+        var refreshToken = await TokenStore.GetRefreshTokenAsync();
+        if (!string.IsNullOrEmpty(accessToken) && !string.IsNullOrEmpty(refreshToken))
+        {
+            try
+            {
+                await AuthApi.RevokeAsync(new RefreshRequest { Token = accessToken, RefreshToken = refreshToken });
+            }
+            catch (HttpRequestException)
+            {
+                // Best-effort — still clear the local session even if the API call fails.
+            }
+        }
+
+        TokenStore.ClearTokens();
+        AuthState.SetLoggedOut();
+        Navigation.NavigateTo("/login", replace: true);
+    }
+}

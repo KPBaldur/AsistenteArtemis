@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using TodoAppRoll.Api.Data;
 using TodoAppRoll.Api.Hubs;
 using TodoAppRoll.Api.Models.Enums;
+using Alarm = TodoAppRoll.Api.Models.Entities.Alarm;
 
 namespace TodoAppRoll.Api.Services
 {
@@ -16,6 +17,10 @@ namespace TodoAppRoll.Api.Services
     {
         private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(15);
         private const int DefaultPomodoroMinutes = 25;
+
+        // App personal de un solo usuario en Chile — hora fija en vez de manejar timezone por usuario.
+        // Chile no usa horario de verano desde 2016, así que no hace falta lidiar con DST acá.
+        private static readonly TimeZoneInfo ChileTimeZone = TimeZoneInfo.FindSystemTimeZoneById("America/Santiago");
 
         private readonly IServiceScopeFactory _scopeFactory;
         private readonly ILogger<AlarmSchedulerService> _logger;
@@ -51,11 +56,20 @@ namespace TodoAppRoll.Api.Services
 
             var now = DateTime.UtcNow;
             var dueAlarms = await context.Alarms
+                .Include(a => a.Audio)
                 .Where(a => a.IsActive && a.ScheduleAt != null && a.ScheduleAt <= now)
                 .ToListAsync(stoppingToken);
 
             foreach (var alarm in dueAlarms)
             {
+                if (alarm.Type == AlarmType.Pomodoro && !IsWithinSchedule(alarm, now))
+                {
+                    // Fuera de los días/horario configurados: no suena, se reintenta el próximo ciclo.
+                    var duration = alarm.DurationMinutes is > 0 ? alarm.DurationMinutes.Value : DefaultPomodoroMinutes;
+                    alarm.ScheduleAt = now.AddMinutes(duration);
+                    continue;
+                }
+
                 _logger.LogInformation("Disparando alarma '{Name}' ({Type}) del usuario {UserId}", alarm.Name, alarm.Type, alarm.UserId);
 
                 await hubContext.Clients.Group(alarm.UserId.ToString()).SendAsync("ReceiveAlarmTrigger", new
@@ -64,13 +78,21 @@ namespace TodoAppRoll.Api.Services
                     name = alarm.Name,
                     type = alarm.Type.ToString(),
                     audioId = alarm.AudioId,
-                    imageId = alarm.ImageId
+                    imageId = alarm.ImageId,
+                    audioUrl = alarm.Audio?.Url,
+                    volume = alarm.Volume
                 }, stoppingToken);
 
                 if (alarm.Type == AlarmType.Pomodoro)
                 {
-                    var duration = alarm.DurationMinutes is > 0 ? alarm.DurationMinutes.Value : DefaultPomodoroMinutes;
-                    alarm.ScheduleAt = now.AddMinutes(duration);
+                    // No se reprograma sola acá: se queda "congelada" (ScheduleAt en null,
+                    // IsActive se mantiene en true) hasta que el usuario la reconozca desde el
+                    // banner — Pausar recién ahí reinicia el conteo desde 0 (AlarmController.
+                    // UpdateAlarm, rama de ScheduleAt explícito), Detener la desactiva. Antes se
+                    // reprogramaba sola de inmediato acá, así que si el usuario tardaba más que
+                    // su propio DurationMinutes en reaccionar, volvía a sonar (y a competir por
+                    // el turno de audio del lado del cliente) sin que nadie la haya reconocido.
+                    alarm.ScheduleAt = null;
                 }
                 else
                 {
@@ -83,6 +105,32 @@ namespace TodoAppRoll.Api.Services
             {
                 await context.SaveChangesAsync(stoppingToken);
             }
+        }
+
+        // Sin ventana configurada (WindowStart/WindowEnd null) = suena todo el tiempo.
+        private static bool IsWithinSchedule(Alarm alarm, DateTime utcNow)
+        {
+            if (!alarm.WindowStart.HasValue || !alarm.WindowEnd.HasValue)
+                return true;
+
+            var localNow = TimeZoneInfo.ConvertTimeFromUtc(utcNow, ChileTimeZone);
+            var today = localNow.DayOfWeek switch
+            {
+                DayOfWeek.Monday => AlarmDaysOfWeek.Monday,
+                DayOfWeek.Tuesday => AlarmDaysOfWeek.Tuesday,
+                DayOfWeek.Wednesday => AlarmDaysOfWeek.Wednesday,
+                DayOfWeek.Thursday => AlarmDaysOfWeek.Thursday,
+                DayOfWeek.Friday => AlarmDaysOfWeek.Friday,
+                DayOfWeek.Saturday => AlarmDaysOfWeek.Saturday,
+                DayOfWeek.Sunday => AlarmDaysOfWeek.Sunday,
+                _ => AlarmDaysOfWeek.None
+            };
+
+            if (!alarm.DaysOfWeek.HasFlag(today))
+                return false;
+
+            var timeOfDay = TimeOnly.FromDateTime(localNow);
+            return timeOfDay >= alarm.WindowStart.Value && timeOfDay <= alarm.WindowEnd.Value;
         }
     }
 }

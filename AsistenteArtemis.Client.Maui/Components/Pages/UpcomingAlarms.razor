@@ -1,0 +1,175 @@
+@page "/alarms/upcoming"
+@using Microsoft.AspNetCore.SignalR.Client
+@implements IAsyncDisposable
+@inject IAlarmApiClient AlarmApi
+@inject TokenStore TokenStore
+@inject AuthState AuthState
+@inject NavigationManager Navigation
+
+<h1>Próximas alarmas</h1>
+
+@if (!AuthState.IsAuthenticated)
+{
+    <p>Redirigiendo a login...</p>
+}
+else
+{
+    <p>
+        Conexión en vivo:
+        @if (_hubConnected)
+        {
+            <span style="color:green;">conectada</span>
+        }
+        else
+        {
+            <span style="color:#a60;">conectando...</span>
+        }
+        <button class="btn btn-sm btn-outline-secondary" @onclick="LoadAsync">Actualizar</button>
+    </p>
+
+    @if (!string.IsNullOrEmpty(_error))
+    {
+        <p class="text-danger">@_error</p>
+    }
+
+    @if (_upcoming is null)
+    {
+        <p>Cargando...</p>
+    }
+    else if (_upcoming.Count == 0)
+    {
+        <p>No hay alarmas activas.</p>
+    }
+    else
+    {
+        <ul class="list-group">
+            @foreach (var item in _upcoming)
+            {
+                <li class="list-group-item d-flex justify-content-between">
+                    <span>
+                        <strong>@item.Alarm.Name</strong> — @item.Alarm.Type
+                        @if (item.Alarm.Type == AlarmType.Pomodoro)
+                        {
+                            <span> (cada @item.Alarm.DurationMinutes min)</span>
+                        }
+                    </span>
+                    <span>@item.NextRing.ToString("dd/MM HH:mm")</span>
+                </li>
+            }
+        </ul>
+    }
+}
+
+@code {
+    private record UpcomingItem(AlarmDto Alarm, DateTime NextRing);
+
+    private static readonly (DayOfWeek Day, AlarmDaysOfWeek Flag)[] DayMap =
+    [
+        (DayOfWeek.Monday, AlarmDaysOfWeek.Monday), (DayOfWeek.Tuesday, AlarmDaysOfWeek.Tuesday),
+        (DayOfWeek.Wednesday, AlarmDaysOfWeek.Wednesday), (DayOfWeek.Thursday, AlarmDaysOfWeek.Thursday),
+        (DayOfWeek.Friday, AlarmDaysOfWeek.Friday), (DayOfWeek.Saturday, AlarmDaysOfWeek.Saturday),
+        (DayOfWeek.Sunday, AlarmDaysOfWeek.Sunday)
+    ];
+
+    private List<UpcomingItem>? _upcoming;
+    private string? _error;
+    private bool _hubConnected;
+    private HubConnection? _hubConnection;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (!AuthState.IsAuthenticated)
+        {
+            Navigation.NavigateTo("/login", replace: true);
+            return;
+        }
+
+        await LoadAsync();
+        await ConnectHubAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            var alarms = await AlarmApi.GetAlarmsAsync();
+            _upcoming = alarms
+                .Where(a => a.IsActive && a.ScheduleAt.HasValue)
+                .Select(a => new UpcomingItem(a, ComputeNextRing(a)))
+                .OrderBy(i => i.NextRing)
+                .ToList();
+            _error = null;
+        }
+        catch (HttpRequestException)
+        {
+            _error = "No se pudieron cargar las alarmas.";
+        }
+    }
+
+    // Sin ventana configurada, ScheduleAt ya es el próximo horario real. Con ventana, el
+    // scheduler puede dejar ScheduleAt en un momento fuera de la ventana mientras reintenta
+    // en silencio (ver AlarmSchedulerService.IsWithinSchedule del lado servidor) — para mostrar
+    // la hora REAL en que va a sonar, buscamos la próxima ocurrencia válida acá, una sola vez
+    // al cargar (nada de recalcular en un timer).
+    private static DateTime ComputeNextRing(AlarmDto alarm)
+    {
+        var scheduleAtLocal = alarm.ScheduleAt!.Value.ToLocalTime();
+        if (!alarm.WindowStart.HasValue || !alarm.WindowEnd.HasValue)
+            return scheduleAtLocal;
+
+        var candidate = scheduleAtLocal > DateTime.Now ? scheduleAtLocal : DateTime.Now;
+        for (var d = 0; d < 8; d++)
+        {
+            var day = candidate.Date.AddDays(d);
+            var flag = DayMap.First(m => m.Day == day.DayOfWeek).Flag;
+            if (!alarm.DaysOfWeek.HasFlag(flag)) continue;
+
+            var windowStart = day.Add(alarm.WindowStart.Value.ToTimeSpan());
+            var windowEnd = day.Add(alarm.WindowEnd.Value.ToTimeSpan());
+            var effectiveStart = d == 0 && candidate > windowStart ? candidate : windowStart;
+            if (effectiveStart <= windowEnd)
+                return effectiveStart;
+        }
+
+        return scheduleAtLocal; // Configuración inconsistente (ej. ningún día marcado) — mostrar el valor crudo.
+    }
+
+    private async Task ConnectHubAsync()
+    {
+        _hubConnection = new HubConnectionBuilder()
+            .WithUrl($"{ApiConfig.HubBaseUrl}/hubs/alarms", options =>
+            {
+                options.AccessTokenProvider = () => TokenStore.GetAccessTokenAsync();
+            })
+            .WithAutomaticReconnect()
+            .Build();
+
+        // Solo se refresca cuando efectivamente suena una alarma (cambia su ScheduleAt) — sin
+        // polling por tiempo, para no gastar recursos en una pantalla que casi siempre muestra
+        // datos que no cambiaron.
+        _hubConnection.On<AlarmTriggeredPayload>("ReceiveAlarmTrigger", _ =>
+        {
+            InvokeAsync(LoadAsync);
+        });
+
+        _hubConnection.Reconnected += _ => { _hubConnected = true; return InvokeAsync(StateHasChanged); };
+        _hubConnection.Reconnecting += _ => { _hubConnected = false; return InvokeAsync(StateHasChanged); };
+        _hubConnection.Closed += _ => { _hubConnected = false; return InvokeAsync(StateHasChanged); };
+
+        try
+        {
+            await _hubConnection.StartAsync();
+            _hubConnected = true;
+        }
+        catch (HttpRequestException)
+        {
+            _hubConnected = false;
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_hubConnection is not null)
+            await _hubConnection.DisposeAsync();
+    }
+}

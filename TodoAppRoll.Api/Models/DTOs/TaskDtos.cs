@@ -38,6 +38,13 @@ namespace TodoAppRoll.Api.Models.DTOs
         public Guid? AlarmId { get; set; }
     }
 
+    // Separado de TaskUpdateDto para poder distinguir "des-vincular" (AlarmId explícito en null)
+    // de "no tocar" (campo ausente) — TaskUpdateDto.AlarmId no puede expresar esa diferencia.
+    public class TaskAlarmUpdateDto
+    {
+        public Guid? AlarmId { get; set; }
+    }
+
     public class SubtaskDto
     {
         public Guid Id { get; set; }
