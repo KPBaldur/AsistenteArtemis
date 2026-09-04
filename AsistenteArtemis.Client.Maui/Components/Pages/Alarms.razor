@@ -31,12 +31,26 @@ else
     @foreach (var ringing in _ringingAlarms)
     {
         <div style="background:#eef; border:1px solid #99f; padding:0.5em; margin-bottom:0.5em;">
-            🔔 ¡Sonó la alarma "@ringing.Name"!
-            @if (ringing.Player is null && !ringing.PlaybackDisposed)
+            @if (ringing.HasActiveBreak)
             {
-                <span style="color:#669; font-style:italic;"> (esperando turno de audio)</span>
+                @if (ringing.PhaseJustEnded == "Work")
+                {
+                    <text>🔔 ¡Terminó tu tiempo de trabajo en "@ringing.Name"! Descansando...</text>
+                }
+                else
+                {
+                    <text>🔔 ¡Terminó tu descanso en "@ringing.Name"! Volviendo a trabajar...</text>
+                }
             }
-            <button class="btn btn-sm btn-outline-secondary" @onclick="() => PauseRingingAlarmAsync(ringing)">Pausar</button>
+            else
+            {
+                <text>🔔 ¡Sonó la alarma "@ringing.Name"!</text>
+                @if (ringing.Player is null && !ringing.PlaybackDisposed)
+                {
+                    <span style="color:#669; font-style:italic;"> (esperando turno de audio)</span>
+                }
+                <button class="btn btn-sm btn-outline-secondary" @onclick="() => PauseRingingAlarmAsync(ringing)">Pausar</button>
+            }
             <button class="btn btn-sm btn-outline-danger" @onclick="() => StopRingingAlarmAsync(ringing)">Detener</button>
         </div>
     }
@@ -62,7 +76,7 @@ else
             <div class="form-group">
                 <label>
                     <input type="checkbox" checked="@_form.PauseEnabled" @onchange="e => _form.PauseEnabled = e.Value is true" />
-                    Habilitar pausa activa (agrega la opción "Pausar" cuando suena)
+                    Habilitar pausa activa (el trabajo y el descanso se alternan solos, sin que tengas que hacer nada al sonar)
                 </label>
             </div>
             @if (_form.PauseEnabled)
@@ -231,6 +245,10 @@ else
         // dentro — sin este guard, Dispose -> Stop -> PlaybackEnded -> Dispose (de nuevo) entra
         // en loop infinito y revienta la pila (stack overflow, tira abajo el proceso entero).
         public bool PlaybackDisposed { get; set; }
+        // Ciclo automático trabajo/descanso (Pausa Activa habilitada): banner sin Pausar, chime
+        // corto en vez del audio largo configurado, se autodescarta solo.
+        public bool HasActiveBreak { get; set; }
+        public string? PhaseJustEnded { get; set; } // "Work" | "Break"
     }
 
     protected override async Task OnInitializedAsync()
@@ -295,10 +313,22 @@ else
                 // El aviso/banner de esta alarma aparece ya, aunque otra siga sonando — el audio
                 // en cambio espera su turno (ver PlayNextQueuedAudioAsync): nunca suenan dos a la
                 // vez, para no mezclarse.
-                var ringing = new RingingAlarm { AlarmId = payload.AlarmId, Name = payload.Name };
+                var ringing = new RingingAlarm
+                {
+                    AlarmId = payload.AlarmId,
+                    Name = payload.Name,
+                    HasActiveBreak = payload.HasActiveBreak == true,
+                    PhaseJustEnded = payload.PhaseJustEnded
+                };
                 _ringingAlarms.Add(ringing);
 
-                if (!string.IsNullOrEmpty(payload.AudioUrl))
+                if (ringing.HasActiveBreak)
+                {
+                    // Ciclo automático (Pausa Activa): chime corto, no el audio largo
+                    // configurado — el servidor ya reprogramó la siguiente fase solo.
+                    _ = PlayPhaseChimeAsync(ringing);
+                }
+                else if (!string.IsNullOrEmpty(payload.AudioUrl))
                 {
                     // Primaria = nadie sonando ni esperando turno ahora mismo — va a entrar de
                     // una en cuanto le toque, sin fade-in. Si no, va a tener que esperar y entra
@@ -327,6 +357,42 @@ else
         {
             _hubConnected = false;
             _error = "No se pudo conectar el aviso en vivo de alarmas (¿la API está corriendo?).";
+        }
+    }
+
+    // Ciclo automático (Pausa Activa): un chime corto del sistema en vez del audio largo
+    // configurado — el servidor ya avanzó de fase solo, esto es puramente un aviso. No pasa
+    // por _pendingAudio/_audioSlotBusy (es casi instantáneo, no vale la pena la cola para
+    // esto) y se autodescarta del banner sin tocar el servidor — a diferencia de Detener,
+    // que sí desactiva la alarma completa.
+    private async Task PlayPhaseChimeAsync(RingingAlarm ringing)
+    {
+        try
+        {
+#if WINDOWS
+            // Console.Beep en vez de MessageBeep/SystemSounds: genera el tono directo, sin
+            // depender del "esquema de sonidos" de Windows (que puede tener el beep en
+            // "Ninguno" o silenciado) ni de paquetes extra. Bloquea el hilo que lo llama por
+            // la duración total, por eso va en un Task.Run — dos tonos cortos ("ding-dong").
+            await Task.Run(() =>
+            {
+                Console.Beep(880, 150);
+                Console.Beep(1046, 150);
+            });
+#endif
+            // El banner queda visible 15s (a pedido del usuario — con menos no le daba tiempo a
+            // leer en qué fase está) antes de autodescartarse solo.
+            await Task.Delay(TimeSpan.FromSeconds(15));
+        }
+        catch
+        {
+            // Best-effort, igual que PlayAlarmSoundAsync — un chime que falla no debe romper
+            // el resto del flujo.
+        }
+        finally
+        {
+            _ringingAlarms.Remove(ringing);
+            StateHasChanged();
         }
     }
 

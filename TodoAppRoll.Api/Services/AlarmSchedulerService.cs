@@ -65,7 +65,10 @@ namespace TodoAppRoll.Api.Services
 
             foreach (var alarm in dueAlarms)
             {
-                if (alarm.Type == AlarmType.Pomodoro && !IsWithinSchedule(alarm, now))
+                // La ventana de días/horario solo aplica para arrancar/continuar la fase de
+                // trabajo — un descanso ya empezado (IsInBreak) no se interrumpe por la ventana,
+                // son minutos cortos y ya en curso.
+                if (alarm.Type == AlarmType.Pomodoro && !alarm.IsInBreak && !IsWithinSchedule(alarm, now))
                 {
                     // Fuera de los días/horario configurados: no suena, se reintenta el próximo ciclo.
                     var duration = alarm.DurationMinutes is > 0 ? alarm.DurationMinutes.Value : DefaultPomodoroMinutes;
@@ -75,6 +78,11 @@ namespace TodoAppRoll.Api.Services
 
                 _logger.LogInformation("Disparando alarma '{Name}' ({Type}) del usuario {UserId}", alarm.Name, alarm.Type, alarm.UserId);
 
+                // Capturado antes de mutar alarm.IsInBreak más abajo — el cliente necesita saber
+                // qué fase acaba de terminar para mostrar el mensaje correcto.
+                var hasActiveBreak = alarm.SnoozeMinutes is > 0;
+                var phaseJustEnded = alarm.IsInBreak ? "Break" : "Work";
+
                 await hubContext.Clients.Group(alarm.UserId.ToString()).SendAsync("ReceiveAlarmTrigger", new
                 {
                     alarmId = alarm.Id,
@@ -83,19 +91,34 @@ namespace TodoAppRoll.Api.Services
                     audioId = alarm.AudioId,
                     imageId = alarm.ImageId,
                     audioUrl = alarm.Audio?.Url,
-                    volume = alarm.Volume
+                    volume = alarm.Volume,
+                    hasActiveBreak,
+                    phaseJustEnded
                 }, stoppingToken);
 
                 if (alarm.Type == AlarmType.Pomodoro)
                 {
-                    // No se reprograma sola acá: se queda "congelada" (ScheduleAt en null,
-                    // IsActive se mantiene en true) hasta que el usuario la reconozca desde el
-                    // banner — Pausar recién ahí reinicia el conteo desde 0 (AlarmController.
-                    // UpdateAlarm, rama de ScheduleAt explícito), Detener la desactiva. Antes se
-                    // reprogramaba sola de inmediato acá, así que si el usuario tardaba más que
-                    // su propio DurationMinutes en reaccionar, volvía a sonar (y a competir por
-                    // el turno de audio del lado del cliente) sin que nadie la haya reconocido.
-                    alarm.ScheduleAt = null;
+                    if (!hasActiveBreak)
+                    {
+                        // Sin Pausa Activa: se queda "congelada" (ScheduleAt en null, IsActive
+                        // se mantiene en true) hasta que el usuario la reconozca desde el banner
+                        // — Pausar recién ahí reinicia el conteo desde 0 (AlarmController.
+                        // UpdateAlarm, rama de ScheduleAt explícito), Detener la desactiva.
+                        alarm.ScheduleAt = null;
+                    }
+                    else if (!alarm.IsInBreak)
+                    {
+                        // Terminó el trabajo -> arranca el descanso solo, sin acción del usuario.
+                        alarm.IsInBreak = true;
+                        alarm.ScheduleAt = now.AddMinutes(alarm.SnoozeMinutes!.Value);
+                    }
+                    else
+                    {
+                        // Terminó el descanso -> arranca el trabajo solo, sin acción del usuario.
+                        alarm.IsInBreak = false;
+                        var duration = alarm.DurationMinutes is > 0 ? alarm.DurationMinutes.Value : DefaultPomodoroMinutes;
+                        alarm.ScheduleAt = now.AddMinutes(duration);
+                    }
                 }
                 else
                 {

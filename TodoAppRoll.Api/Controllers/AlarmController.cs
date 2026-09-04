@@ -53,7 +53,8 @@ namespace TodoAppRoll.Api.Controllers
             WindowStart = a.WindowStart,
             WindowEnd = a.WindowEnd,
             SnoozeMinutes = a.SnoozeMinutes,
-            Volume = a.Volume
+            Volume = a.Volume,
+            IsInBreak = a.IsInBreak
         };
 
         // GET: api/Alarm
@@ -147,6 +148,8 @@ namespace TodoAppRoll.Api.Controllers
             if (updateDto.ImageId.HasValue) alarm.ImageId = updateDto.ImageId;
             if (updateDto.DaysOfWeek.HasValue) alarm.DaysOfWeek = updateDto.DaysOfWeek.Value;
             if (updateDto.Volume.HasValue) alarm.Volume = ClampVolume(updateDto.Volume);
+            var snoozeChanged = (updateDto.ClearSnoozeMinutes && alarm.SnoozeMinutes.HasValue)
+                || (updateDto.SnoozeMinutes is > 0 && updateDto.SnoozeMinutes != alarm.SnoozeMinutes);
             if (updateDto.ClearSnoozeMinutes) alarm.SnoozeMinutes = null;
             else if (updateDto.SnoozeMinutes is > 0) alarm.SnoozeMinutes = updateDto.SnoozeMinutes;
             if (updateDto.ClearWindow)
@@ -176,9 +179,12 @@ namespace TodoAppRoll.Api.Controllers
                 // Cambio explícito de horario (ej: snooze).
                 alarm.ScheduleAt = updateDto.ScheduleAt;
             }
-            else if (alarm.Type == AlarmType.Pomodoro && (reactivating || durationChanged))
+            else if (alarm.Type == AlarmType.Pomodoro && (reactivating || durationChanged || snoozeChanged))
             {
-                // Reactivación o cambio de duración: reinicia el conteo desde ahora.
+                // Reactivación, o cambio de duración/Pausa Activa: reinicia el ciclo en fase de
+                // trabajo desde ahora — evita dejar una fase "descanso" fantasma con una
+                // duración vieja si se edita la alarma a mitad de un ciclo.
+                alarm.IsInBreak = false;
                 var duration = alarm.DurationMinutes is > 0 ? alarm.DurationMinutes.Value : DefaultPomodoroMinutes;
                 alarm.ScheduleAt = DateTime.UtcNow.AddMinutes(duration);
             }
@@ -219,7 +225,9 @@ namespace TodoAppRoll.Api.Controllers
                 audioId = alarm.AudioId,
                 imageId = alarm.ImageId,
                 audioUrl = alarm.Audio?.Url,
-                volume = alarm.Volume
+                volume = alarm.Volume,
+                hasActiveBreak = alarm.SnoozeMinutes is > 0,
+                phaseJustEnded = alarm.IsInBreak ? "Break" : "Work"
             });
 
             return Ok(new { message = "Alarma disparada vía SignalR" });

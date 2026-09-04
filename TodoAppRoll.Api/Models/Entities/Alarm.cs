@@ -20,6 +20,11 @@ namespace TodoAppRoll.Api.Models.Entities
         public int? SnoozeMinutes { get; set; } // Minutos que pospone el botón "Pausar" al sonar
         public int? Volume { get; set; } // 0-100, null = volumen máximo
 
+        // Ciclo automático trabajo/descanso (solo relevante cuando SnoozeMinutes > 0): false =
+        // contando DurationMinutes (trabajo), true = contando SnoozeMinutes (descanso). Sin
+        // Pausa Activa configurada, se queda siempre en false.
+        public bool IsInBreak { get; set; }
+
         // Personalización Multimedia
         public Guid? AudioId { get; set; }
         public virtual Media? Audio { get; set; }

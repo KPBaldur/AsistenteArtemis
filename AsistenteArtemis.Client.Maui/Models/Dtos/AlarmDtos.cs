@@ -20,6 +20,7 @@ public class AlarmDto
     public TimeOnly? WindowEnd { get; set; }
     public int? SnoozeMinutes { get; set; }
     public int? Volume { get; set; }
+    public bool IsInBreak { get; set; }
 }
 
 public class AlarmCreateDto
@@ -66,4 +67,6 @@ public class AlarmTriggeredPayload
     public Guid? ImageId { get; set; }
     public string? AudioUrl { get; set; }
     public int? Volume { get; set; }
+    public bool? HasActiveBreak { get; set; }
+    public string? PhaseJustEnded { get; set; }
 }

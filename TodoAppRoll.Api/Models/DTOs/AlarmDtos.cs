@@ -18,6 +18,7 @@ namespace TodoAppRoll.Api.Models.DTOs
         public TimeOnly? WindowEnd { get; set; }
         public int? SnoozeMinutes { get; set; }
         public int? Volume { get; set; }
+        public bool IsInBreak { get; set; }
     }
 
     public class AlarmCreateDto
