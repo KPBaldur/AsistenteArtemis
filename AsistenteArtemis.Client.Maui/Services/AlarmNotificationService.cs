@@ -1,33 +1,60 @@
 using AsistenteArtemis.Client.Maui.Models.Dtos;
+using AsistenteArtemis.Client.Maui.Models.Enums;
 using Microsoft.AspNetCore.SignalR.Client;
 using Plugin.Maui.Audio;
 
 namespace AsistenteArtemis.Client.Maui.Services;
 
-// Conexión de SignalR propia, a nivel de toda la app (no atada al ciclo de vida de ninguna
-// página) — existe para mandar la notificación nativa de Windows y reproducir el sonido real de
-// la alarma sin importar en qué pantalla esté el usuario. Alarms.razor tiene su propia conexión
-// y su propia cola de turnos para cuando esa página SÍ está abierta (con banner, botones
-// Pausar/Detener, etc.) — deliberadamente no centralizado todo en un solo lugar, para no tener
-// que migrar ese pipeline ya verificado. IsAlarmsPageActive es la señal que evita que las dos
-// conexiones reproduzcan el mismo audio dos veces cuando Alarms.razor sí está abierta.
+// Única fuente de verdad para "alarma sonando" (banner + cola de turnos de audio + Pausar/
+// Detener) — antes esto vivía duplicado acá (versión "headless", solo audio/toast) y en
+// Alarms.razor (versión con banner, atada al ciclo de vida de esa página). Se unificó acá
+// porque esta conexión ya es a nivel de toda la app, sin importar qué pantalla esté abierta —
+// el popup real (Components/Shared/AlarmPopup.razor) se renderiza desde MainLayout y solo lee
+// este estado. Reemplaza el toast nativo de Windows (NativeNotifications.ShowToast, ya
+// removido) — ver decisión del 2026-09-04 en el wiki.
 public class AlarmNotificationService
 {
     private readonly TokenStore _tokenStore;
     private readonly AuthState _authState;
     private readonly IAudioManager _audioManager;
+    private readonly IAlarmApiClient _alarmApi;
     private HubConnection? _hubConnection;
 
-    private readonly Queue<(string Url, int? VolumePercent, bool IsPrimary)> _pendingAudio = new();
+    private readonly List<RingingAlarm> _ringingAlarms = new();
+    private readonly Queue<(RingingAlarm Ringing, string Url, int? VolumePercent, bool IsPrimary)> _pendingAudio = new();
     private bool _audioSlotBusy;
 
-    public bool IsAlarmsPageActive { get; set; }
+    public IReadOnlyList<RingingAlarm> RingingAlarms => _ringingAlarms;
+    public bool IsConnected { get; private set; }
 
-    public AlarmNotificationService(TokenStore tokenStore, AuthState authState, IAudioManager audioManager)
+    // Un solo evento para "algo cambió que le importa a la UI" (sonó una alarma nueva, se
+    // pausó/detuvo una, cambió el estado de conexión) — el popup y Alarms.razor simplemente
+    // refrescan su vista, sin necesitar saber qué cambió puntualmente.
+    public event Action? Changed;
+
+    public RingingAlarm? this[Guid alarmId] => _ringingAlarms.FirstOrDefault(r => r.AlarmId == alarmId);
+
+    public class RingingAlarm
+    {
+        public Guid AlarmId { get; init; }
+        public string Name { get; init; } = string.Empty;
+        // Referencia al reproductor real que quedó sonando — sin esto, Pausar/Detener solo
+        // reprogramarían la alarma del lado del servidor pero el audio seguiría sonando solo.
+        public ManagedAlarmAudio? Player { get; set; }
+        // Ciclo automático trabajo/descanso (Pausa Activa habilitada): banner sin Pausar, chime
+        // corto en vez del audio largo configurado, se autodescarta solo.
+        public bool HasActiveBreak { get; init; }
+        public string? PhaseJustEnded { get; init; } // "Work" | "Break"
+
+        public string Message => NativeNotifications.BuildRingingMessage(Name, HasActiveBreak, PhaseJustEnded);
+    }
+
+    public AlarmNotificationService(TokenStore tokenStore, AuthState authState, IAudioManager audioManager, IAlarmApiClient alarmApi)
     {
         _tokenStore = tokenStore;
         _authState = authState;
         _audioManager = audioManager;
+        _alarmApi = alarmApi;
         _authState.Changed += OnAuthChanged;
 
         if (_authState.IsAuthenticated)
@@ -62,34 +89,51 @@ public class AlarmNotificationService
 
         hubConnection.On<AlarmTriggeredPayload>("ReceiveAlarmTrigger", payload =>
         {
-            var message = NativeNotifications.BuildRingingMessage(payload.Name, payload.HasActiveBreak == true, payload.PhaseJustEnded);
-            NativeNotifications.ShowToast(message);
-
-            if (IsAlarmsPageActive) return; // esa página ya se encarga del audio
-
-            if (payload.HasActiveBreak == true)
+            var ringing = new RingingAlarm
             {
-                _ = PlayChimeAsync();
+                AlarmId = payload.AlarmId,
+                Name = payload.Name,
+                HasActiveBreak = payload.HasActiveBreak == true,
+                PhaseJustEnded = payload.PhaseJustEnded
+            };
+            _ringingAlarms.Add(ringing);
+            Changed?.Invoke();
+
+            if (ringing.HasActiveBreak)
+            {
+                // Ciclo automático (Pausa Activa): chime corto, no el audio largo configurado —
+                // el servidor ya reprogramó la siguiente fase solo.
+                _ = PlayPhaseChimeAsync(ringing);
             }
             else if (!string.IsNullOrEmpty(payload.AudioUrl))
             {
+                // Primaria = nadie sonando ni esperando turno ahora mismo — entra directo, sin
+                // fade-in. Si no, espera su turno y entra suave (ver decisión "cola de turnos").
                 var isPrimary = !_audioSlotBusy && _pendingAudio.Count == 0;
-                _pendingAudio.Enqueue((payload.AudioUrl, payload.Volume, isPrimary));
+                _pendingAudio.Enqueue((ringing, payload.AudioUrl, payload.Volume, isPrimary));
                 _ = PlayNextQueuedAudioAsync();
             }
         });
+
+        hubConnection.Reconnected += _ => { IsConnected = true; Changed?.Invoke(); return Task.CompletedTask; };
+        hubConnection.Reconnecting += _ => { IsConnected = false; Changed?.Invoke(); return Task.CompletedTask; };
+        hubConnection.Closed += _ => { IsConnected = false; Changed?.Invoke(); return Task.CompletedTask; };
 
         _hubConnection = hubConnection;
 
         try
         {
             await hubConnection.StartAsync();
+            IsConnected = true;
+            Changed?.Invoke();
         }
         catch
         {
-            // Best-effort — si no conecta ahora, no hay toast/audio hasta el próximo cambio de
+            // Best-effort — si no conecta ahora, no hay banner/audio hasta el próximo cambio de
             // AuthState (login/logout) que reintente ConnectAsync.
             _hubConnection = null;
+            IsConnected = false;
+            Changed?.Invoke();
         }
     }
 
@@ -98,45 +142,86 @@ public class AlarmNotificationService
         if (_hubConnection is null) return;
         var hub = _hubConnection;
         _hubConnection = null;
+        IsConnected = false;
         await hub.DisposeAsync();
+        Changed?.Invoke();
     }
 
-    // Chime corto de las transiciones de Pausa Activa (mismo Console.Beep que Alarms.razor usa
-    // en su banner) — acá no hace falta autodescartar ningún banner, solo sonar.
-    private static async Task PlayChimeAsync()
+    // Chime corto de las transiciones de Pausa Activa. El banner queda visible 15s (a pedido
+    // del usuario — con menos no le daba tiempo a leer en qué fase está) antes de
+    // autodescartarse solo, sin tocar el servidor (a diferencia de Detener).
+    private async Task PlayPhaseChimeAsync(RingingAlarm ringing)
     {
-#if WINDOWS
         try
         {
+#if WINDOWS
+            // Console.Beep en vez de MessageBeep/SystemSounds: genera el tono directo, sin
+            // depender del "esquema de sonidos" de Windows ni de paquetes extra. Bloquea el
+            // hilo que lo llama por la duración total, por eso va en un Task.Run.
             await Task.Run(() =>
             {
                 Console.Beep(880, 150);
                 Console.Beep(1046, 150);
             });
+#endif
+            await Task.Delay(TimeSpan.FromSeconds(15));
         }
         catch
         {
+            // Best-effort, mismo criterio que el resto de la reproducción de audio acá.
         }
-#else
-        await Task.CompletedTask;
-#endif
+        finally
+        {
+            _ringingAlarms.Remove(ringing);
+            Changed?.Invoke();
+        }
     }
 
-    // Cola simple (sin banner, sin lista de "ringing") — evita que dos alarmas se mezclen
-    // estando lejos de Alarms.razor. Misma mecánica de audio (ManagedAlarmAudio) que esa página:
-    // Ended (disparado cuando el clip termina solo o alguien llama Stop) libera el turno; si
-    // PlayAsync nunca llega a crear el reproductor (descarga fallida, etc.), Ended no se dispara
-    // solo, así que el fallback en el finally (playerCreated) cubre ese caso — sin él la cola
-    // quedaría trabada para siempre.
+    // Solo un audio suena por vez — si ya hay otra sonando, esta queda en cola hasta que la
+    // anterior se pause/detenga o termine sola; el banner de "sonó la alarma" sí aparece de
+    // inmediato para todas, sin esperar el turno del audio (ver decisión "cola de turnos").
     private async Task PlayNextQueuedAudioAsync()
     {
         if (_audioSlotBusy) return;
         if (!_pendingAudio.TryDequeue(out var next)) return;
 
+        if (!_ringingAlarms.Contains(next.Ringing))
+        {
+            // Se pausó/detuvo mientras esperaba su turno en cola — probar la siguiente.
+            _ = PlayNextQueuedAudioAsync();
+            return;
+        }
+
         _audioSlotBusy = true;
         var playerCreated = false;
         try
         {
+            await PlayAlarmSoundAsync(next.Ringing, next.Url, next.IsPrimary, next.VolumePercent, () => playerCreated = true);
+        }
+        finally
+        {
+            // Si PlayAlarmSoundAsync nunca llegó a crear el player (descarga fallida, audio
+            // roto, etc.), nadie va a llamar Stop para liberar el turno — cubrir ese caso acá
+            // para que la cola no quede trabada para siempre.
+            if (!playerCreated)
+            {
+                _audioSlotBusy = false;
+                _ = PlayNextQueuedAudioAsync();
+            }
+        }
+    }
+
+    // Reproducción best-effort: un audio roto, sin red, o un formato no soportado no debe
+    // romper el banner de la alarma. La mecánica real (descarga+caché, fix de seek, guard de
+    // stack overflow) vive en ManagedAlarmAudio.
+    private async Task PlayAlarmSoundAsync(RingingAlarm ringing, string url, bool isPrimary, int? volumePercent, Action onPlayerCreated)
+    {
+        try
+        {
+            // Si ya se apretó Pausar/Detener mientras esperábamos nuestro turno en cola, no
+            // arrancar a sonar igual.
+            if (!_ringingAlarms.Contains(ringing)) return;
+
             var managed = new ManagedAlarmAudio();
             managed.Ended += () =>
             {
@@ -144,20 +229,59 @@ public class AlarmNotificationService
                 _ = PlayNextQueuedAudioAsync();
             };
 
-            await managed.PlayAsync(_audioManager, next.Url, next.VolumePercent, fadeIn: !next.IsPrimary,
-                onPlayerCreated: () => playerCreated = true);
+            await managed.PlayAsync(_audioManager, url, volumePercent, fadeIn: !isPrimary,
+                shouldContinue: () => _ringingAlarms.Contains(ringing),
+                onPlayerCreated: () =>
+                {
+                    ringing.Player = managed;
+                    onPlayerCreated();
+                    Changed?.Invoke(); // saca "(esperando turno de audio)" ni bien arranca
+                });
         }
         catch
         {
-            // Best-effort, mismo criterio que PlayAlarmSoundAsync en Alarms.razor.
+            // Silencioso a propósito, ver comentario arriba.
         }
-        finally
+    }
+
+    private static void StopPlayback(RingingAlarm ringing) => ringing.Player?.Stop();
+
+    // Detener/Pausar del popup de "sonó la alarma" — cada banner es independiente (ver
+    // RingingAlarms) para el caso de dos alarmas cruzadas.
+    public async Task StopRingingAlarmAsync(Guid alarmId)
+    {
+        var ringing = this[alarmId];
+        if (ringing is null) return;
+
+        StopPlayback(ringing);
+        _ringingAlarms.Remove(ringing);
+        Changed?.Invoke();
+        await _alarmApi.UpdateAlarmAsync(alarmId, new AlarmUpdateDto { IsActive = false });
+    }
+
+    // Con "Pausa activa" configurada (SnoozeMinutes), Pausar entra en ese descanso y al
+    // terminar retoma el ciclo normal de DurationMinutes. Sin pausa activa configurada, Pausar
+    // simplemente repite el propio intervalo de la alarma (DurationMinutes) — "que vuelva a
+    // sonar dentro de 30 minutos, la configuración que le hice".
+    public async Task PauseRingingAlarmAsync(Guid alarmId)
+    {
+        var ringing = this[alarmId];
+        if (ringing is null) return;
+
+        StopPlayback(ringing);
+        _ringingAlarms.Remove(ringing);
+        Changed?.Invoke();
+
+        var alarms = await _alarmApi.GetAlarmsAsync();
+        var alarm = alarms.FirstOrDefault(a => a.Id == alarmId);
+        var minutes = alarm?.SnoozeMinutes
+            ?? (alarm?.Type == AlarmType.Pomodoro ? alarm?.DurationMinutes : null)
+            ?? 5;
+
+        await _alarmApi.UpdateAlarmAsync(alarmId, new AlarmUpdateDto
         {
-            if (!playerCreated)
-            {
-                _audioSlotBusy = false;
-                _ = PlayNextQueuedAudioAsync();
-            }
-        }
+            IsActive = true,
+            ScheduleAt = DateTime.UtcNow.AddMinutes(minutes)
+        });
     }
 }

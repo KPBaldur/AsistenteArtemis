@@ -1,10 +1,7 @@
 @page "/alarms"
-@using Microsoft.AspNetCore.SignalR.Client
-@implements IAsyncDisposable
+@implements IDisposable
 @inject IAlarmApiClient AlarmApi
 @inject IMediaApiClient MediaApi
-@inject IAudioManager AudioManager
-@inject TokenStore TokenStore
 @inject AuthState AuthState
 @inject NavigationManager Navigation
 @inject AlarmNotificationService NotificationService
@@ -19,7 +16,7 @@ else
 {
     <p>
         Conexión en vivo:
-        @if (_hubConnected)
+        @if (NotificationService.IsConnected)
         {
             <span style="color:green;">conectada</span>
         }
@@ -28,22 +25,6 @@ else
             <span style="color:#a60;">conectando...</span>
         }
     </p>
-
-    @foreach (var ringing in _ringingAlarms)
-    {
-        <div style="background:#eef; border:1px solid #99f; padding:0.5em; margin-bottom:0.5em;">
-            🔔 @GetRingingMessage(ringing)
-            @if (!ringing.HasActiveBreak)
-            {
-                @if (ringing.Player is null)
-                {
-                    <span style="color:#669; font-style:italic;"> (esperando turno de audio)</span>
-                }
-                <button class="btn btn-sm btn-outline-secondary" @onclick="() => PauseRingingAlarmAsync(ringing)">Pausar</button>
-            }
-            <button class="btn btn-sm btn-outline-danger" @onclick="() => StopRingingAlarmAsync(ringing)">Detener</button>
-        </div>
-    }
 
     <EditForm Model="_form" OnValidSubmit="SaveAlarmAsync">
         <div class="form-group">
@@ -212,35 +193,6 @@ else
     private string? _error;
     private bool _busy;
     private bool _uploadingAudio;
-    private bool _hubConnected;
-    private readonly List<RingingAlarm> _ringingAlarms = new();
-    // Turnos de audio: el banner de cada alarma sonando aparece de inmediato, pero el audio de
-    // cada una espera su turno acá — nunca suenan dos mezcladas.
-    private readonly Queue<(RingingAlarm Ringing, string Url, int? VolumePercent, bool IsPrimary)> _pendingAudio = new();
-    private bool _audioSlotBusy;
-    private HubConnection? _hubConnection;
-
-    private class RingingAlarm
-    {
-        public Guid AlarmId { get; set; }
-        public string Name { get; set; } = string.Empty;
-        // Referencia al reproductor real que quedó sonando — sin esto, Pausar/Detener solo
-        // reprogramaban la alarma del lado del servidor pero el audio seguía sonando solo.
-        // ManagedAlarmAudio (Services/ManagedAlarmAudio.cs) trae su propio guard contra la
-        // reentrada de Plugin.Maui.Audio en WinUI (Dispose -> Stop -> PlaybackEnded -> Dispose
-        // de nuevo, que sin guard revienta la pila) — compartido con AlarmNotificationService
-        // para el audio "headless" cuando esta página no está abierta.
-        public ManagedAlarmAudio? Player { get; set; }
-        // Ciclo automático trabajo/descanso (Pausa Activa habilitada): banner sin Pausar, chime
-        // corto en vez del audio largo configurado, se autodescarta solo.
-        public bool HasActiveBreak { get; set; }
-        public string? PhaseJustEnded { get; set; } // "Work" | "Break"
-    }
-
-    // Mismo texto que usa el toast nativo (NativeNotifications, vía AlarmNotificationService) —
-    // un solo lugar para la lógica del mensaje, no duplicada en los dos.
-    private static string GetRingingMessage(RingingAlarm ringing) =>
-        NativeNotifications.BuildRingingMessage(ringing.Name, ringing.HasActiveBreak, ringing.PhaseJustEnded);
 
     protected override async Task OnInitializedAsync()
     {
@@ -250,14 +202,20 @@ else
             return;
         }
 
-        // Mientras esta página está abierta, ella se encarga del audio real (cola de turnos,
-        // banner) — AlarmNotificationService se calla para no duplicar el sonido.
-        NotificationService.IsAlarmsPageActive = true;
+        // El banner/audio de "sonó la alarma" y el estado de conexión en vivo ahora viven en
+        // AlarmNotificationService (global, no atado a esta página) — acá solo hace falta
+        // refrescar la lista cuando algo cambia (ej. una Pomodoro se reprograma sola al sonar).
+        NotificationService.Changed += OnNotificationChanged;
 
         await LoadAlarmsAsync();
         await LoadMediaAsync();
-        await ConnectHubAsync();
     }
+
+    private void OnNotificationChanged() => InvokeAsync(async () =>
+    {
+        await LoadAlarmsAsync();
+        StateHasChanged();
+    });
 
     private async Task LoadAlarmsAsync()
     {
@@ -288,175 +246,6 @@ else
         catch (HttpRequestException)
         {
             // No bloquea el resto de la pantalla — simplemente no habrá audios para elegir.
-        }
-    }
-
-    private async Task ConnectHubAsync()
-    {
-        _hubConnection = new HubConnectionBuilder()
-            .WithUrl($"{ApiConfig.HubBaseUrl}/hubs/alarms", options =>
-            {
-                options.AccessTokenProvider = () => TokenStore.GetAccessTokenAsync();
-            })
-            .WithAutomaticReconnect()
-            .Build();
-
-        _hubConnection.On<AlarmTriggeredPayload>("ReceiveAlarmTrigger", payload =>
-        {
-            InvokeAsync(async () =>
-            {
-                // El aviso/banner de esta alarma aparece ya, aunque otra siga sonando — el audio
-                // en cambio espera su turno (ver PlayNextQueuedAudioAsync): nunca suenan dos a la
-                // vez, para no mezclarse.
-                var ringing = new RingingAlarm
-                {
-                    AlarmId = payload.AlarmId,
-                    Name = payload.Name,
-                    HasActiveBreak = payload.HasActiveBreak == true,
-                    PhaseJustEnded = payload.PhaseJustEnded
-                };
-                _ringingAlarms.Add(ringing);
-                // El toast nativo de Windows lo manda AlarmNotificationService (conexión propia,
-                // a nivel de toda la app) — no acá, para no duplicarlo mientras esta página está
-                // abierta (las dos conexiones reciben el mismo evento).
-
-                if (ringing.HasActiveBreak)
-                {
-                    // Ciclo automático (Pausa Activa): chime corto, no el audio largo
-                    // configurado — el servidor ya reprogramó la siguiente fase solo.
-                    _ = PlayPhaseChimeAsync(ringing);
-                }
-                else if (!string.IsNullOrEmpty(payload.AudioUrl))
-                {
-                    // Primaria = nadie sonando ni esperando turno ahora mismo — va a entrar de
-                    // una en cuanto le toque, sin fade-in. Si no, va a tener que esperar y entra
-                    // suave cuando llegue su turno.
-                    var isPrimary = !_audioSlotBusy && _pendingAudio.Count == 0;
-                    _pendingAudio.Enqueue((ringing, payload.AudioUrl, payload.Volume, isPrimary));
-                    _ = PlayNextQueuedAudioAsync();
-                }
-                // Pomodoro se reprograma solo (+duración) y DateTime se desactiva al sonar —
-                // recargar para reflejar el estado real que ya cambió del lado del servidor.
-                await LoadAlarmsAsync();
-                StateHasChanged();
-            });
-        });
-
-        _hubConnection.Reconnected += _ => { _hubConnected = true; return InvokeAsync(StateHasChanged); };
-        _hubConnection.Reconnecting += _ => { _hubConnected = false; return InvokeAsync(StateHasChanged); };
-        _hubConnection.Closed += _ => { _hubConnected = false; return InvokeAsync(StateHasChanged); };
-
-        try
-        {
-            await _hubConnection.StartAsync();
-            _hubConnected = true;
-        }
-        catch (HttpRequestException)
-        {
-            _hubConnected = false;
-            _error = "No se pudo conectar el aviso en vivo de alarmas (¿la API está corriendo?).";
-        }
-    }
-
-    // Ciclo automático (Pausa Activa): un chime corto del sistema en vez del audio largo
-    // configurado — el servidor ya avanzó de fase solo, esto es puramente un aviso. No pasa
-    // por _pendingAudio/_audioSlotBusy (es casi instantáneo, no vale la pena la cola para
-    // esto) y se autodescarta del banner sin tocar el servidor — a diferencia de Detener,
-    // que sí desactiva la alarma completa.
-    private async Task PlayPhaseChimeAsync(RingingAlarm ringing)
-    {
-        try
-        {
-#if WINDOWS
-            // Console.Beep en vez de MessageBeep/SystemSounds: genera el tono directo, sin
-            // depender del "esquema de sonidos" de Windows (que puede tener el beep en
-            // "Ninguno" o silenciado) ni de paquetes extra. Bloquea el hilo que lo llama por
-            // la duración total, por eso va en un Task.Run — dos tonos cortos ("ding-dong").
-            await Task.Run(() =>
-            {
-                Console.Beep(880, 150);
-                Console.Beep(1046, 150);
-            });
-#endif
-            // El banner queda visible 15s (a pedido del usuario — con menos no le daba tiempo a
-            // leer en qué fase está) antes de autodescartarse solo.
-            await Task.Delay(TimeSpan.FromSeconds(15));
-        }
-        catch
-        {
-            // Best-effort, igual que PlayAlarmSoundAsync — un chime que falla no debe romper
-            // el resto del flujo.
-        }
-        finally
-        {
-            _ringingAlarms.Remove(ringing);
-            StateHasChanged();
-        }
-    }
-
-    // Solo un audio suena por vez (ver _pendingAudio/_audioSlotBusy) — si ya hay otra sonando,
-    // esta queda en cola hasta que la anterior se pause/detenga o termine sola; el banner de
-    // "sonó la alarma" sí aparece de inmediato para todas, sin esperar el turno del audio.
-    private async Task PlayNextQueuedAudioAsync()
-    {
-        if (_audioSlotBusy) return;
-        if (!_pendingAudio.TryDequeue(out var next)) return;
-
-        if (!_ringingAlarms.Contains(next.Ringing))
-        {
-            // Se pausó/detuvo mientras esperaba su turno en cola — probar la siguiente.
-            _ = PlayNextQueuedAudioAsync();
-            return;
-        }
-
-        _audioSlotBusy = true;
-        try
-        {
-            await PlayAlarmSoundAsync(next.Ringing, next.Url, next.IsPrimary, next.VolumePercent);
-        }
-        finally
-        {
-            // Si PlayAlarmSoundAsync nunca llegó a crear el player (descarga fallida, audio
-            // roto, etc.), nadie va a llamar StopPlayback para liberar el turno — cubrir ese
-            // caso acá para que la cola no quede trabada para siempre.
-            if (next.Ringing.Player is null)
-            {
-                _audioSlotBusy = false;
-                _ = PlayNextQueuedAudioAsync();
-            }
-        }
-    }
-
-    // Reproducción best-effort: un audio roto, sin red, o un formato no soportado no debe
-    // romper el banner de la alarma ni el resto del handler de SignalR. La mecánica real
-    // (descarga+caché, fix de seek, guard de stack overflow) vive en ManagedAlarmAudio —
-    // compartida con AlarmNotificationService para el audio "headless".
-    private async Task PlayAlarmSoundAsync(RingingAlarm ringing, string url, bool isPrimary, int? volumePercent)
-    {
-        try
-        {
-            // Si ya se apretó Pausar/Detener mientras esperábamos nuestro turno en cola, no
-            // arrancar a sonar igual — ringing ya no está en la lista de alarmas sonando.
-            if (!_ringingAlarms.Contains(ringing)) return;
-
-            var managed = new ManagedAlarmAudio();
-            managed.Ended += () =>
-            {
-                _audioSlotBusy = false;
-                _ = PlayNextQueuedAudioAsync();
-            };
-
-            await managed.PlayAsync(AudioManager, url, volumePercent, fadeIn: !isPrimary,
-                shouldContinue: () => _ringingAlarms.Contains(ringing),
-                onPlayerCreated: () =>
-                {
-                    ringing.Player = managed;
-                    StateHasChanged(); // saca "(esperando turno de audio)" ni bien arranca
-                });
-        }
-        catch
-        {
-            // Silencioso a propósito, ver comentario arriba.
         }
     }
 
@@ -644,49 +433,9 @@ else
         await LoadAlarmsAsync();
     }
 
-    // Detener/Pausar del banner de "sonó la alarma" — a diferencia de Pausar/Dormir en la lista
-    // (manuales, en cualquier momento), estos actúan sobre la alarma que efectivamente sonó.
-    // Cada banner es independiente (ver _ringingAlarms) para el caso de dos alarmas cruzadas.
-    // ManagedAlarmAudio.Stop() ya es idempotente y dispara Ended (suscripto en
-    // PlayAlarmSoundAsync) para liberar _audioSlotBusy/avanzar la cola — un solo lugar para esa
-    // lógica, se dispare por acá o porque el audio terminó solo.
-    private static void StopPlayback(RingingAlarm ringing) => ringing.Player?.Stop();
-
-    private async Task StopRingingAlarmAsync(RingingAlarm ringing)
+    public void Dispose()
     {
-        StopPlayback(ringing);
-        _ringingAlarms.Remove(ringing);
-        await AlarmApi.UpdateAlarmAsync(ringing.AlarmId, new AlarmUpdateDto { IsActive = false });
-        await LoadAlarmsAsync();
-    }
-
-    // Con "Pausa activa" configurada (SnoozeMinutes), Pausar entra en ese descanso y al
-    // terminar retoma el ciclo normal de DurationMinutes (el scheduler ya reprograma por
-    // DurationMinutes en cada disparo, así que no hace falta ningún paso extra acá). Sin
-    // pausa activa configurada, Pausar simplemente repite el propio intervalo de la alarma
-    // (DurationMinutes) — "que vuelva a sonar dentro de 30 minutos, la configuración que le hice".
-    private async Task PauseRingingAlarmAsync(RingingAlarm ringing)
-    {
-        StopPlayback(ringing);
-        _ringingAlarms.Remove(ringing);
-
-        var alarm = _alarms?.FirstOrDefault(a => a.Id == ringing.AlarmId);
-        var minutes = alarm?.SnoozeMinutes
-            ?? (alarm?.Type == AlarmType.Pomodoro ? alarm?.DurationMinutes : null)
-            ?? 5;
-        await AlarmApi.UpdateAlarmAsync(ringing.AlarmId, new AlarmUpdateDto
-        {
-            IsActive = true,
-            ScheduleAt = DateTime.UtcNow.AddMinutes(minutes)
-        });
-        await LoadAlarmsAsync();
-    }
-
-    public async ValueTask DisposeAsync()
-    {
-        NotificationService.IsAlarmsPageActive = false;
-        if (_hubConnection is not null)
-            await _hubConnection.DisposeAsync();
+        NotificationService.Changed -= OnNotificationChanged;
     }
 
     private class AlarmFormModel

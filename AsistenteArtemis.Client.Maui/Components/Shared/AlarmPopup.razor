@@ -1,0 +1,45 @@
+@* Popup propio del aviso de alarma — renderizado desde MainLayout, así que aparece sin
+   importar qué pantalla esté mostrando el usuario. Reemplaza el toast nativo de Windows
+   (descartado por intermitente, ver decisión del 2026-09-04): a diferencia de un toast, este es
+   parte de la propia app y trae Pausar/Detener ahí mismo. Solo lee el estado de
+   AlarmNotificationService — la lógica de audio/cola/hub vive toda ahí. *@
+@implements IDisposable
+@inject AlarmNotificationService NotificationService
+
+@if (NotificationService.RingingAlarms.Count > 0)
+{
+    <div class="alarm-popup-stack">
+        @foreach (var ringing in NotificationService.RingingAlarms)
+        {
+            <div class="alarm-popup">
+                <span>🔔 @ringing.Message</span>
+                @if (!ringing.HasActiveBreak)
+                {
+                    @if (ringing.Player is null)
+                    {
+                        <span class="alarm-popup-waiting"> (esperando turno de audio)</span>
+                    }
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => PauseAsync(ringing.AlarmId)">Pausar</button>
+                }
+                <button class="btn btn-sm btn-outline-danger" @onclick="() => StopAsync(ringing.AlarmId)">Detener</button>
+            </div>
+        }
+    </div>
+}
+
+@code {
+    protected override void OnInitialized()
+    {
+        NotificationService.Changed += OnChanged;
+    }
+
+    private void OnChanged() => InvokeAsync(StateHasChanged);
+
+    private Task PauseAsync(Guid alarmId) => NotificationService.PauseRingingAlarmAsync(alarmId);
+    private Task StopAsync(Guid alarmId) => NotificationService.StopRingingAlarmAsync(alarmId);
+
+    public void Dispose()
+    {
+        NotificationService.Changed -= OnChanged;
+    }
+}
