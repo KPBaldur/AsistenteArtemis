@@ -6,16 +6,18 @@ from google import genai
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.config import GEMINI_API_KEY, INTERNAL_API_KEY
+from app import vault
+from app.config import GEMINI_API_KEY, INTERNAL_API_KEY, VAULT_ENABLED, VAULT_OWNER_USER_ID
 from app.db import get_db
 from app.embeddings import embed_texts
 from app.identity import build_system_instruction
-from app.models import AIMessage, Alarm, Note, NoteEmbedding, Task
+from app.models import AIMessage, Alarm, Note, NoteEmbedding, Task, VaultChunk
 
 router = APIRouter(prefix="/internal", tags=["chat"])
 
 CHAT_MODEL = "gemini-3.6-flash"  # mismo modelo probado en producción en uma-backend
 TOP_K_CHUNKS = 5
+TOP_K_VAULT_CHUNKS = 6
 HISTORY_MESSAGES = 10
 
 _client = genai.Client(api_key=GEMINI_API_KEY)
@@ -36,8 +38,7 @@ class ChatResponse(BaseModel):
     reply: str
 
 
-def _retrieve_note_chunks(db: Session, user_id: uuid.UUID, message: str) -> list[str]:
-    [query_vector] = embed_texts([message], task_type="RETRIEVAL_QUERY")
+def _retrieve_note_chunks(db: Session, user_id: uuid.UUID, query_vector: list[float]) -> list[str]:
     rows = (
         db.query(NoteEmbedding)
         .filter(NoteEmbedding.user_id == user_id)
@@ -74,6 +75,32 @@ def _upcoming_tasks_summary(db: Session, user_id: uuid.UUID) -> str:
     return "Tareas del usuario programadas para los próximos 7 días:\n" + "\n".join(lines)
 
 
+def _vault_section(db: Session, user_id: uuid.UUID, query_vector: list[float]) -> str | None:
+    """Contexto del cerebro de proyectos (BrainObsidian), solo para el dueño
+    del vault. La tabla de estado va siempre (es chica); los fragmentos, por
+    similitud con el mensaje."""
+    if not VAULT_ENABLED or str(user_id) != VAULT_OWNER_USER_ID:
+        return None
+    try:
+        status = vault.project_status_text()
+    except Exception:
+        status = "(no se pudo leer el estado de los proyectos del vault)"
+    rows = (
+        db.query(VaultChunk.chunk_text)
+        .order_by(VaultChunk.embedding.cosine_distance(query_vector))
+        .limit(TOP_K_VAULT_CHUNKS)
+        .all()
+    )
+    fragments = "\n\n".join(text for (text,) in rows) if rows else "(el vault todavía no está indexado)"
+    return f"""# Estado de los proyectos del usuario (cerebro de proyectos)
+{status}
+
+# Fragmentos relevantes del cerebro de proyectos
+Cada fragmento empieza con [ruta · proyecto · tipo]. Si usás uno, mencioná de qué nota sale.
+
+{fragments}"""
+
+
 def _recent_history(db: Session, session_id: uuid.UUID) -> list[AIMessage]:
     rows = (
         db.query(AIMessage)
@@ -86,7 +113,12 @@ def _recent_history(db: Session, session_id: uuid.UUID) -> list[AIMessage]:
 
 
 def _build_prompt(
-    system_instruction: str, note_chunks: list[str], tasks_summary: str, history: list[AIMessage], message: str
+    system_instruction: str,
+    note_chunks: list[str],
+    tasks_summary: str,
+    history: list[AIMessage],
+    message: str,
+    vault_section: str | None = None,
 ) -> str:
     notes_section = (
         "\n\n".join(f"- {chunk}" for chunk in note_chunks)
@@ -94,13 +126,14 @@ def _build_prompt(
         else "No se encontraron notas relevantes para esta pregunta."
     )
     history_section = "\n".join(f"{m.Role}: {m.Content}" for m in history) if history else "(sin mensajes previos)"
+    vault_block = f"\n\n{vault_section}" if vault_section else ""
 
     return f"""{system_instruction}
 
 # Notas relevantes del usuario
 {notes_section}
 
-# {tasks_summary}
+# {tasks_summary}{vault_block}
 
 # Historial reciente de la conversación
 {history_section}
@@ -112,11 +145,15 @@ def _build_prompt(
 @router.post("/chat", response_model=ChatResponse, dependencies=[Depends(require_internal_key)])
 def chat(request: ChatRequest, db: Session = Depends(get_db)) -> ChatResponse:
     system_instruction = build_system_instruction(db, request.user_id)
-    note_chunks = _retrieve_note_chunks(db, request.user_id, request.message)
+    [query_vector] = embed_texts([request.message], task_type="RETRIEVAL_QUERY")
+    note_chunks = _retrieve_note_chunks(db, request.user_id, query_vector)
     tasks_summary = _upcoming_tasks_summary(db, request.user_id)
+    vault_section = _vault_section(db, request.user_id, query_vector)
     history = _recent_history(db, request.session_id)
 
-    prompt = _build_prompt(system_instruction, note_chunks, tasks_summary, history, request.message)
+    prompt = _build_prompt(
+        system_instruction, note_chunks, tasks_summary, history, request.message, vault_section
+    )
 
     try:
         interaction = _client.interactions.create(

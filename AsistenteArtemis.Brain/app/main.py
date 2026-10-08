@@ -10,24 +10,29 @@ from fastapi import FastAPI
 # uvicorn. En Linux/Render no hace falta (locale ya es UTF-8 por defecto).
 
 from app.chat import router as chat_router
+from app.config import VAULT_ENABLED
 from app.sync import sync_loop
 from app.suggestions import suggestions_loop
+from app.vault_api import router as vault_router
+from app.vault_sync import vault_sync_loop
 
 logging.basicConfig(level=logging.INFO)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    sync_task = asyncio.create_task(sync_loop())
-    suggestions_task = asyncio.create_task(suggestions_loop())
+    tasks = [asyncio.create_task(sync_loop()), asyncio.create_task(suggestions_loop())]
+    if VAULT_ENABLED:
+        tasks.append(asyncio.create_task(vault_sync_loop()))
     yield
-    sync_task.cancel()
-    suggestions_task.cancel()
+    for task in tasks:
+        task.cancel()
 
 
 app = FastAPI(title="AsistenteArtemis Brain", lifespan=lifespan)
 
 app.include_router(chat_router)
+app.include_router(vault_router)
 
 
 @app.get("/health")

@@ -31,6 +31,26 @@ class NoteEmbedding(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class VaultChunk(Base):
+    """Tabla propia del Brain: fragmentos embebidos del cerebro de proyectos
+    (vault BrainObsidian). Sin user_id -- el vault es de un solo usuario y el
+    acceso se controla con VAULT_OWNER_USER_ID (ver app/config.py)."""
+
+    __tablename__ = "vault_chunks"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    path: Mapped[str] = mapped_column(Text, index=True)  # relativa a la raíz del vault, con '/'
+    doc_type: Mapped[str | None] = mapped_column(Text, nullable=True)  # frontmatter `tipo`
+    project: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)  # slug del proyecto
+    heading: Mapped[str | None] = mapped_column(Text, nullable=True)
+    chunk_index: Mapped[int] = mapped_column(Integer)
+    chunk_text: Mapped[str] = mapped_column(Text)
+    embedding: Mapped[list] = mapped_column(Vector(EMBEDDING_DIM))
+    # sha256 del archivo completo al embeber -- si cambia, se re-embebe el archivo entero.
+    content_hash: Mapped[str] = mapped_column(Text)
+    indexed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 # --- Modelos de solo lectura sobre tablas que dueña TodoAppRoll.Api (EF Core) ---
 # Nombres de tabla/columna en PascalCase exacto porque EF Core los crea así
 # (confirmado contra las migraciones .NET), no se tocan desde acá con Alembic.
