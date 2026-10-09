@@ -16,6 +16,7 @@ namespace TodoAppRoll.Api.Models.DTOs
         public DateTime? CompletedAt { get; set; }
         public DateTime CreatedAt { get; set; }
         public Guid? AlarmId { get; set; }
+        public string? ProjectSlug { get; set; }
         public List<SubtaskDto> Subtasks { get; set; } = new List<SubtaskDto>();
     }
 
@@ -26,6 +27,17 @@ namespace TodoAppRoll.Api.Models.DTOs
         public TaskPriority Priority { get; set; } = TaskPriority.Medium;
         public int Order { get; set; }
         public Guid? AlarmId { get; set; }
+        public string? ProjectSlug { get; set; }
+    }
+
+    // POST api/Task/reminder: tarea + (opcional) alarma de fecha vinculada, en un solo paso.
+    // Un "recordatorio" es una tarea con hora (decisión del 2026-10-09).
+    public class ReminderCreateDto
+    {
+        public string Title { get; set; } = string.Empty;
+        public string Description { get; set; } = string.Empty;
+        public DateTime? RemindAt { get; set; } // UTC; null = tarea sin alarma
+        public string? ProjectSlug { get; set; }
     }
 
     public class TaskUpdateDto

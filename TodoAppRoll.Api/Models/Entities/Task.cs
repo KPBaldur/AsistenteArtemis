@@ -17,6 +17,10 @@ namespace TodoAppRoll.Api.Models.Entities
         public DateTime? CompletedAt { get; set; }
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
+        // Proyecto del cerebro de proyectos (BrainObsidian) al que pertenece la tarea: el `id`
+        // del frontmatter de 01-proyectos/<slug>/<slug>.md. Null = tarea suelta.
+        public string? ProjectSlug { get; set; }
+
         // Relaciones
         public virtual User User { get; set; } = null!;
         public virtual ICollection<Subtask> Subtasks { get; set; } = new List<Subtask>();

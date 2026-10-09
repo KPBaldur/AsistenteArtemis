@@ -228,6 +228,42 @@ namespace TodoAppRoll.Api.Migrations
                     b.ToTable("AuditLogs");
                 });
 
+            modelBuilder.Entity("TodoAppRoll.Api.Models.Entities.DeviceToken", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("LastUsedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime?>("RevokedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("TokenHash")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TokenHash")
+                        .IsUnique();
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("DeviceTokens");
+                });
+
             modelBuilder.Entity("TodoAppRoll.Api.Models.Entities.Media", b =>
                 {
                     b.Property<Guid>("Id")
@@ -444,6 +480,9 @@ namespace TodoAppRoll.Api.Migrations
                     b.Property<int>("Priority")
                         .HasColumnType("integer");
 
+                    b.Property<string>("ProjectSlug")
+                        .HasColumnType("text");
+
                     b.Property<int>("Status")
                         .HasColumnType("integer");
 
@@ -578,6 +617,17 @@ namespace TodoAppRoll.Api.Migrations
                 });
 
             modelBuilder.Entity("TodoAppRoll.Api.Models.Entities.AuditLog", b =>
+                {
+                    b.HasOne("TodoAppRoll.Api.Models.Entities.User", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("User");
+                });
+
+            modelBuilder.Entity("TodoAppRoll.Api.Models.Entities.DeviceToken", b =>
                 {
                     b.HasOne("TodoAppRoll.Api.Models.Entities.User", "User")
                         .WithMany()

@@ -24,6 +24,7 @@ namespace TodoAppRoll.Api.Data
         public DbSet<ServerMonitor> Monitors { get; set; } = null!;
         public DbSet<MonitorCheckResult> MonitorCheckResults { get; set; } = null!;
         public DbSet<AssistantIdentity> AssistantIdentities { get; set; } = null!;
+        public DbSet<DeviceToken> DeviceTokens { get; set; } = null!;
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -87,6 +88,17 @@ namespace TodoAppRoll.Api.Data
             modelBuilder.Entity<AssistantIdentity>()
                 .HasIndex(a => a.UserId)
                 .IsUnique();
+
+            // Tokens de dispositivo (mascota): se buscan por hash en cada request.
+            modelBuilder.Entity<DeviceToken>()
+                .HasIndex(d => d.TokenHash)
+                .IsUnique();
+
+            modelBuilder.Entity<DeviceToken>()
+                .HasOne(d => d.User)
+                .WithMany()
+                .HasForeignKey(d => d.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
         }
     }
 }

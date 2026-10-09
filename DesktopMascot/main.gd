@@ -39,10 +39,22 @@ const LOOK_SMOOTHING := 6.0
 const BREATH_PERIOD := 4.2
 const BLINK_DURATION := 0.16
 
-enum MenuItem { RESET_POSITION, QUIT }
+enum MenuItem { NEW_ALARM, NEW_NOTE, NEW_TASK, NEW_REMINDER, PROJECT_COMMENT, SERVERS, RESET_POSITION, QUIT }
+
+const LunaTheme := preload("res://luna_theme.gd")
+const ApiClient := preload("res://api_client.gd")
+const Bubble := preload("res://bubble.gd")
+const ServersWindow := preload("res://servers_window.gd")
+const AlarmForm := preload("res://forms/alarm_form.gd")
+const NoteForm := preload("res://forms/note_form.gd")
+const TaskForm := preload("res://forms/task_form.gd")
+const CommentForm := preload("res://forms/comment_form.gd")
 
 @onready var _camera: Camera3D = $Camera3D
 @onready var _menu: PopupMenu = $ContextMenu
+
+var _api: ApiClient
+var _bubble: Bubble
 
 var _skeleton: Skeleton3D
 var _bones := {}
@@ -64,6 +76,10 @@ var _drag_offset := Vector2i.ZERO
 func _ready() -> void:
 	_setup_window()
 	_load_avatar()
+	_api = ApiClient.new()
+	add_child(_api)
+	_bubble = Bubble.new()
+	add_child(_bubble)
 	_setup_menu()
 	_handle_screenshot_arg()
 
@@ -241,10 +257,40 @@ func _animate_blink(delta: float) -> void:
 # --- Mouse: arrastrar y menú -------------------------------------------------
 
 func _setup_menu() -> void:
-	_menu.add_item("Volver a la esquina", MenuItem.RESET_POSITION)
+	_menu.theme = LunaTheme.get_theme()
+	_menu.add_separator("Crear")
+	_menu.add_item("Alarma…", MenuItem.NEW_ALARM)
+	_menu.add_item("Recordatorio…", MenuItem.NEW_REMINDER)
+	_menu.add_item("Tarea…", MenuItem.NEW_TASK)
+	_menu.add_item("Nota…", MenuItem.NEW_NOTE)
+	_menu.add_item("Comentario de proyecto…", MenuItem.PROJECT_COMMENT)
+	_menu.add_separator("Ver")
+	_menu.add_item("Estado de servidores", MenuItem.SERVERS)
 	_menu.add_separator()
+	_menu.add_item("Volver a la esquina", MenuItem.RESET_POSITION)
 	_menu.add_item("Salir", MenuItem.QUIT)
 	_menu.id_pressed.connect(_on_menu_id_pressed)
+
+
+func _window_rect() -> Rect2i:
+	return Rect2i(get_window().position, get_window().size)
+
+
+func say(text: String, kind := "info", seconds := 5.0) -> void:
+	_bubble.say(text, _window_rect(), kind, seconds)
+
+
+# Abre una ventanita (formulario o vista). Sin conexión con la Api, avisa en la burbuja en
+# vez de abrir un formulario que no podría guardar.
+func _open(window_script: GDScript, extra: Dictionary = {}) -> void:
+	if not _api.is_linked():
+		say(ApiClient.NOT_LINKED_MESSAGE, "error", 7.0)
+		return
+	var window: Window = window_script.new()
+	add_child(window)
+	if window.has_signal("saved"):
+		window.saved.connect(func(message: String): say(message, "ok"))
+	window.open(_api, _window_rect(), extra)
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -265,6 +311,18 @@ func _unhandled_input(event: InputEvent) -> void:
 
 func _on_menu_id_pressed(id: int) -> void:
 	match id:
+		MenuItem.NEW_ALARM:
+			_open(AlarmForm)
+		MenuItem.NEW_REMINDER:
+			_open(TaskForm, { reminder = true })
+		MenuItem.NEW_TASK:
+			_open(TaskForm, { reminder = false })
+		MenuItem.NEW_NOTE:
+			_open(NoteForm)
+		MenuItem.PROJECT_COMMENT:
+			_open(CommentForm)
+		MenuItem.SERVERS:
+			_open(ServersWindow)
 		MenuItem.RESET_POSITION:
 			get_window().position = _corner_position()
 			_save_position()
@@ -281,11 +339,25 @@ func _handle_screenshot_arg() -> void:
 		if arg.begins_with("--look="):
 			var parts := arg.trim_prefix("--look=").split(",")
 			_fixed_look = Vector2(parts[0].to_float(), parts[1].to_float())
+	# --open=alarm|reminder|task|note|servers abre esa ventanita (aunque no haya conexión con
+	# la Api) y la captura es de esa ventana en vez de la mascota.
+	var target: Viewport = get_viewport()
+	for arg in OS.get_cmdline_user_args():
+		if arg.begins_with("--open="):
+			var forms := { alarm = [AlarmForm, {}], reminder = [TaskForm, { reminder = true }],
+				task = [TaskForm, { reminder = false }], note = [NoteForm, {}], servers = [ServersWindow, {}],
+				comment = [CommentForm, {}] }
+			var entry: Array = forms.get(arg.trim_prefix("--open="), [])
+			if not entry.is_empty():
+				var window: Window = entry[0].new()
+				add_child(window)
+				window.open(_api, _window_rect(), entry[1])
+				target = window
 	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with("--screenshot="):
 			await get_tree().create_timer(1.5).timeout
 			await RenderingServer.frame_post_draw
 			var path := arg.trim_prefix("--screenshot=")
-			get_viewport().get_texture().get_image().save_png(path)
+			target.get_texture().get_image().save_png(path)
 			print("Captura guardada en ", path)
 			get_tree().quit()

@@ -49,6 +49,7 @@ namespace TodoAppRoll.Api.Controllers
                     CompletedAt = t.CompletedAt,
                     CreatedAt = t.CreatedAt,
                     AlarmId = t.AlarmId,
+                    ProjectSlug = t.ProjectSlug,
                     Subtasks = t.Subtasks.Select(s => new SubtaskDto
                     {
                         Id = s.Id,
@@ -76,6 +77,7 @@ namespace TodoAppRoll.Api.Controllers
                 Priority = createDto.Priority,
                 Order = createDto.Order,
                 AlarmId = createDto.AlarmId,
+                ProjectSlug = NormalizeSlug(createDto.ProjectSlug),
                 CreatedAt = DateTime.UtcNow,
                 Status = TaskStatus.Pending
             };
@@ -83,18 +85,72 @@ namespace TodoAppRoll.Api.Controllers
             _context.Tasks.Add(task);
             await _context.SaveChangesAsync();
 
-            return CreatedAtAction(nameof(GetTasks), new { id = task.Id }, new TaskDto
-            {
-                Id = task.Id,
-                Title = task.Title,
-                Description = task.Description,
-                Status = task.Status,
-                Priority = task.Priority,
-                Order = task.Order,
-                CreatedAt = task.CreatedAt,
-                AlarmId = task.AlarmId
-            });
+            return CreatedAtAction(nameof(GetTasks), new { id = task.Id }, ToDto(task));
         }
+
+        // POST: api/Task/reminder — tarea con alarma de fecha opcional, atómico (lo usa la
+        // mascota). A diferencia de PUT {id}/alarm, aquí sí se vincula una alarma DateTime:
+        // es la alarma propia del recordatorio, creada junto con la tarea.
+        [HttpPost("reminder")]
+        public async Task<ActionResult<TaskDto>> CreateReminder(ReminderCreateDto dto)
+        {
+            if (string.IsNullOrWhiteSpace(dto.Title))
+                return BadRequest(new { message = "El título es obligatorio" });
+            if (dto.RemindAt.HasValue && dto.RemindAt.Value.ToUniversalTime() <= DateTime.UtcNow)
+                return BadRequest(new { message = "La hora del recordatorio debe ser futura" });
+
+            var userId = GetUserId();
+            var nextOrder = await _context.Tasks.Where(t => t.UserId == userId)
+                .Select(t => (int?)t.Order).MaxAsync() ?? -1;
+
+            var task = new Task
+            {
+                Id = Guid.NewGuid(),
+                UserId = userId,
+                Title = dto.Title.Trim(),
+                Description = dto.Description.Trim(),
+                Order = nextOrder + 1,
+                ProjectSlug = NormalizeSlug(dto.ProjectSlug),
+                CreatedAt = DateTime.UtcNow,
+                Status = TaskStatus.Pending
+            };
+
+            if (dto.RemindAt.HasValue)
+            {
+                var alarm = new Alarm
+                {
+                    Id = Guid.NewGuid(),
+                    UserId = userId,
+                    Name = task.Title,
+                    Type = AlarmType.DateTime,
+                    ScheduleAt = dto.RemindAt.Value.ToUniversalTime(),
+                    IsActive = true
+                };
+                _context.Alarms.Add(alarm);
+                task.AlarmId = alarm.Id;
+            }
+
+            _context.Tasks.Add(task);
+            await _context.SaveChangesAsync();
+
+            return CreatedAtAction(nameof(GetTasks), new { id = task.Id }, ToDto(task));
+        }
+
+        private static string? NormalizeSlug(string? slug) =>
+            string.IsNullOrWhiteSpace(slug) ? null : slug.Trim().ToLowerInvariant();
+
+        private static TaskDto ToDto(Task task) => new TaskDto
+        {
+            Id = task.Id,
+            Title = task.Title,
+            Description = task.Description,
+            Status = task.Status,
+            Priority = task.Priority,
+            Order = task.Order,
+            CreatedAt = task.CreatedAt,
+            AlarmId = task.AlarmId,
+            ProjectSlug = task.ProjectSlug
+        };
 
         // PUT: api/Task/{id}
         [HttpPut("{id}")]

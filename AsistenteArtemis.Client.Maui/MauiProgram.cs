@@ -53,6 +53,10 @@ public static class MauiProgram
 				c => c.BaseAddress = new Uri(ApiConfig.BaseUrl))
 			.AddHttpMessageHandler<AuthDelegatingHandler>();
 
+		builder.Services.AddHttpClient<IDeviceTokenApiClient, DeviceTokenApiClient>(
+				c => c.BaseAddress = new Uri(ApiConfig.BaseUrl))
+			.AddHttpMessageHandler<AuthDelegatingHandler>();
+
 		builder.Services.AddSingleton(AudioManager.Current);
 
 		// Longer timeout: SendMessage calls the Brain synchronously, which calls Gemini.

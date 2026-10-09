@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -57,7 +58,23 @@ namespace TodoAppRoll.Api
             // Configuración de Autenticación JWT
             var key = builder.Configuration["Jwt:Key"]
                 ?? throw new InvalidOperationException("Falta configurar Jwt:Key (dotnet user-secrets set \"Jwt:Key\" \"...\" en local, o la variable de entorno Jwt__Key en despliegue).");
-            builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+            // Esquema por defecto "selector": "Authorization: Device <token>" (mascota de
+            // escritorio) va al handler de tokens de dispositivo; todo lo demás, al JWT de
+            // siempre. Así los [Authorize] existentes aceptan ambas credenciales sin cambios.
+            const string SelectorScheme = "JwtOrDevice";
+            builder.Services.AddAuthentication(SelectorScheme)
+                .AddPolicyScheme(SelectorScheme, "JWT o token de dispositivo", options =>
+                {
+                    options.ForwardDefaultSelector = context =>
+                    {
+                        string? header = context.Request.Headers.Authorization;
+                        return header?.StartsWith(DeviceTokenAuthenticationHandler.HeaderPrefix, StringComparison.Ordinal) == true
+                            ? DeviceTokenAuthenticationHandler.SchemeName
+                            : JwtBearerDefaults.AuthenticationScheme;
+                    };
+                })
+                .AddScheme<AuthenticationSchemeOptions, DeviceTokenAuthenticationHandler>(
+                    DeviceTokenAuthenticationHandler.SchemeName, null)
                 .AddJwtBearer(options =>
                 {
                     options.TokenValidationParameters = new TokenValidationParameters

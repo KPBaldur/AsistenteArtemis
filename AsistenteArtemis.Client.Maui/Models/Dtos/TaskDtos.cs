@@ -18,6 +18,7 @@ public class TaskDto
     public DateTime? CompletedAt { get; set; }
     public DateTime CreatedAt { get; set; }
     public Guid? AlarmId { get; set; }
+    public string? ProjectSlug { get; set; }
     public List<SubtaskDto> Subtasks { get; set; } = new();
 }
 
@@ -28,6 +29,7 @@ public class TaskCreateDto
     public TaskPriority Priority { get; set; } = TaskPriority.Medium;
     public int Order { get; set; }
     public Guid? AlarmId { get; set; }
+    public string? ProjectSlug { get; set; }
 }
 
 public class TaskUpdateDto
