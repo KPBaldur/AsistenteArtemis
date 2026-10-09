@@ -21,7 +21,11 @@ public class AlarmNotificationService
     private HubConnection? _hubConnection;
 
     private readonly List<RingingAlarm> _ringingAlarms = new();
-    private readonly Queue<(RingingAlarm Ringing, string Url, int? VolumePercent, bool IsPrimary)> _pendingAudio = new();
+    private readonly Queue<(RingingAlarm Ringing, string Url, int? VolumePercent, bool IsPrimary, TimeSpan? MaxDuration)> _pendingAudio = new();
+
+    // En los cambios de fase de Pausa Activa suena el audio propio solo este rato (a pedido
+    // del usuario, 2026-10-09): avisa sin quedar sonando durante todo el descanso.
+    private static readonly TimeSpan PhaseAudioMaxDuration = TimeSpan.FromSeconds(10);
     private bool _audioSlotBusy;
 
     public IReadOnlyList<RingingAlarm> RingingAlarms => _ringingAlarms;
@@ -101,17 +105,16 @@ public class AlarmNotificationService
 
             if (ringing.HasActiveBreak)
             {
-                // Ciclo automático (Pausa Activa): chime corto, no el audio largo configurado —
-                // el servidor ya reprogramó la siguiente fase solo.
-                _ = PlayPhaseChimeAsync(ringing);
+                // Ciclo automático (Pausa Activa): el servidor ya reprogramó la siguiente fase
+                // solo. Suena el audio propio recortado (o el chime si no hay audio) y el banner
+                // se autodescarta.
+                if (!string.IsNullOrEmpty(payload.AudioUrl))
+                    EnqueueAudio(ringing, payload.AudioUrl, payload.Volume, PhaseAudioMaxDuration);
+                _ = AutoDismissPhaseBannerAsync(ringing, playChime: string.IsNullOrEmpty(payload.AudioUrl));
             }
             else if (!string.IsNullOrEmpty(payload.AudioUrl))
             {
-                // Primaria = nadie sonando ni esperando turno ahora mismo — entra directo, sin
-                // fade-in. Si no, espera su turno y entra suave (ver decisión "cola de turnos").
-                var isPrimary = !_audioSlotBusy && _pendingAudio.Count == 0;
-                _pendingAudio.Enqueue((ringing, payload.AudioUrl, payload.Volume, isPrimary));
-                _ = PlayNextQueuedAudioAsync();
+                EnqueueAudio(ringing, payload.AudioUrl, payload.Volume, maxDuration: null);
             }
         });
 
@@ -147,22 +150,34 @@ public class AlarmNotificationService
         Changed?.Invoke();
     }
 
-    // Chime corto de las transiciones de Pausa Activa. El banner queda visible 15s (a pedido
-    // del usuario — con menos no le daba tiempo a leer en qué fase está) antes de
-    // autodescartarse solo, sin tocar el servidor (a diferencia de Detener).
-    private async Task PlayPhaseChimeAsync(RingingAlarm ringing)
+    // Primaria = nadie sonando ni esperando turno ahora mismo — entra directo, sin fade-in. Si
+    // no, espera su turno y entra suave (ver decisión "cola de turnos").
+    private void EnqueueAudio(RingingAlarm ringing, string url, int? volumePercent, TimeSpan? maxDuration)
+    {
+        var isPrimary = !_audioSlotBusy && _pendingAudio.Count == 0;
+        _pendingAudio.Enqueue((ringing, url, volumePercent, isPrimary, maxDuration));
+        _ = PlayNextQueuedAudioAsync();
+    }
+
+    // Transiciones de Pausa Activa: chime corto si la alarma no tiene audio propio. El banner
+    // queda visible 15s (a pedido del usuario — con menos no le daba tiempo a leer en qué fase
+    // está) antes de autodescartarse solo, sin tocar el servidor (a diferencia de Detener).
+    private async Task AutoDismissPhaseBannerAsync(RingingAlarm ringing, bool playChime)
     {
         try
         {
 #if WINDOWS
-            // Console.Beep en vez de MessageBeep/SystemSounds: genera el tono directo, sin
-            // depender del "esquema de sonidos" de Windows ni de paquetes extra. Bloquea el
-            // hilo que lo llama por la duración total, por eso va en un Task.Run.
-            await Task.Run(() =>
+            if (playChime)
             {
-                Console.Beep(880, 150);
-                Console.Beep(1046, 150);
-            });
+                // Console.Beep en vez de MessageBeep/SystemSounds: genera el tono directo, sin
+                // depender del "esquema de sonidos" de Windows ni de paquetes extra. Bloquea el
+                // hilo que lo llama por la duración total, por eso va en un Task.Run.
+                await Task.Run(() =>
+                {
+                    Console.Beep(880, 150);
+                    Console.Beep(1046, 150);
+                });
+            }
 #endif
             await Task.Delay(TimeSpan.FromSeconds(15));
         }
@@ -172,6 +187,7 @@ public class AlarmNotificationService
         }
         finally
         {
+            StopPlayback(ringing);
             _ringingAlarms.Remove(ringing);
             Changed?.Invoke();
         }
@@ -196,7 +212,7 @@ public class AlarmNotificationService
         var playerCreated = false;
         try
         {
-            await PlayAlarmSoundAsync(next.Ringing, next.Url, next.IsPrimary, next.VolumePercent, () => playerCreated = true);
+            await PlayAlarmSoundAsync(next.Ringing, next.Url, next.IsPrimary, next.VolumePercent, next.MaxDuration, () => playerCreated = true);
         }
         finally
         {
@@ -214,7 +230,8 @@ public class AlarmNotificationService
     // Reproducción best-effort: un audio roto, sin red, o un formato no soportado no debe
     // romper el banner de la alarma. La mecánica real (descarga+caché, fix de seek, guard de
     // stack overflow) vive en ManagedAlarmAudio.
-    private async Task PlayAlarmSoundAsync(RingingAlarm ringing, string url, bool isPrimary, int? volumePercent, Action onPlayerCreated)
+    private async Task PlayAlarmSoundAsync(RingingAlarm ringing, string url, bool isPrimary, int? volumePercent,
+        TimeSpan? maxDuration, Action onPlayerCreated)
     {
         try
         {
@@ -236,6 +253,11 @@ public class AlarmNotificationService
                     ringing.Player = managed;
                     onPlayerCreated();
                     Changed?.Invoke(); // saca "(esperando turno de audio)" ni bien arranca
+                    if (maxDuration is { } limit)
+                    {
+                        // Stop() es idempotente: si ya terminó sola o la detuvieron, no pasa nada.
+                        _ = Task.Delay(limit).ContinueWith(_ => managed.Stop());
+                    }
                 });
         }
         catch
