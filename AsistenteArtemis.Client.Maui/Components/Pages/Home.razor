@@ -1,9 +1,181 @@
 @page "/"
+@using System.Globalization
 @inject AuthState AuthState
 @inject TokenStore TokenStore
 @inject NavigationManager Navigation
+@inject ITaskApiClient TaskApi
+@inject IAlarmApiClient AlarmApi
+@inject IMonitorApiClient MonitorApi
+@inject IAssistantIdentityApiClient IdentityApi
+
+@* Pantalla "Hoy" (R1 del sistema "Luna de caza"): briefing + alarmas, sistemas y tareas.
+   Datos reales de la Api; el briefing se arma aquí con esos datos hasta que exista
+   un endpoint propio en el Brain. *@
+@if (AuthState.IsAuthenticated)
+{
+    <header class="today-header">
+        <div>
+            <div class="overline">@_today</div>
+            <h1>@Greeting(), @AuthState.Username</h1>
+        </div>
+        <a class="btn btn-outline-secondary" href="/chat">
+            <Icon Name="chat" Size="18" /> Preguntar a @_assistantName
+        </a>
+    </header>
+
+    <Card Class="briefing-card">
+        <div class="briefing">
+            <div class="portrait" aria-hidden="true"><Icon Name="moon" Size="26" /></div>
+            <div>
+                <div class="overline">@_assistantName</div>
+                @if (_loading)
+                {
+                    <p class="briefing__text">Revisando tu día…</p>
+                }
+                else
+                {
+                    <p class="briefing__text">
+                        @foreach (var part in _briefing)
+                        {
+                            if (part.Highlight)
+                            {
+                                <span class="briefing__highlight">@part.Text</span>
+                            }
+                            else
+                            {
+                                @part.Text
+                            }
+                        }
+                    </p>
+                }
+                <div class="briefing__actions">
+                    <a class="btn btn-sm btn-primary" href="/tasks">Ver tareas</a>
+                    <a class="btn btn-sm btn-outline-secondary" href="/alarms">Alarmas</a>
+                </div>
+            </div>
+        </div>
+    </Card>
+
+    @if (!string.IsNullOrEmpty(_error))
+    {
+        <p class="text-danger">@_error</p>
+    }
+
+    <div class="card-grid" style="margin-top: var(--space-section);">
+        <Card Title="Próximas alarmas">
+            <Action><a href="/alarms/upcoming">Ver todas</a></Action>
+            <ChildContent>
+                @if (_loading)
+                {
+                    <p class="empty-ui">Cargando…</p>
+                }
+                else if (_alarms is null)
+                {
+                    <p class="empty-ui">No disponible.</p>
+                }
+                else if (_alarms.Count == 0)
+                {
+                    <p class="empty-ui">No hay alarmas activas.</p>
+                }
+                else
+                {
+                    <ul class="row-list">
+                        @foreach (var (alarm, next) in _alarms.Take(4))
+                        {
+                            <li>
+                                <span class="mono">@FormatWhen(next)</span>
+                                <span class="row-list__main">@alarm.Name</span>
+                            </li>
+                        }
+                    </ul>
+                }
+            </ChildContent>
+        </Card>
+
+        <Card Title="Sistemas" Warning="@(_monitors?.Any(m => m.LastStatus == MonitorStatus.Down) == true)">
+            <Action><a href="/monitor">Detalle</a></Action>
+            <ChildContent>
+                @if (_loading)
+                {
+                    <p class="empty-ui">Cargando…</p>
+                }
+                else if (_monitors is null)
+                {
+                    <p class="empty-ui">No disponible.</p>
+                }
+                else if (_monitors.Count == 0)
+                {
+                    <p class="empty-ui">Sin servidores configurados.</p>
+                }
+                else
+                {
+                    <ul class="row-list">
+                        @foreach (var monitor in _monitors)
+                        {
+                            <li>
+                                <StatusDot Kind="@StatusKind(monitor)" Label="@StatusLabel(monitor)" />
+                                <span class="row-list__main">@monitor.Name</span>
+                                <span class="row-list__meta mono">@MonitorMeta(monitor)</span>
+                            </li>
+                        }
+                    </ul>
+                }
+            </ChildContent>
+        </Card>
+
+        <Card Title="Tareas pendientes">
+            <Action><a href="/tasks">Abrir</a></Action>
+            <ChildContent>
+                @if (_loading)
+                {
+                    <p class="empty-ui">Cargando…</p>
+                }
+                else if (_tasks is null)
+                {
+                    <p class="empty-ui">No disponible.</p>
+                }
+                else if (_tasks.Count == 0)
+                {
+                    <p class="empty-ui">Nada pendiente. Buen momento para un bloque de foco.</p>
+                }
+                else
+                {
+                    <ul class="row-list">
+                        @foreach (var task in _tasks.Take(5))
+                        {
+                            <li>
+                                <span class="row-list__main">@task.Title</span>
+                                @if (task.Status == TaskStatus.InProgress)
+                                {
+                                    <span class="pill">en curso</span>
+                                }
+                                else if (task.Priority == TaskPriority.High)
+                                {
+                                    <span class="pill pill--warning">alta</span>
+                                }
+                            </li>
+                        }
+                    </ul>
+                }
+            </ChildContent>
+        </Card>
+    </div>
+}
 
 @code {
+    private record BriefingPart(string Text, bool Highlight = false);
+
+    private static readonly CultureInfo Es = CultureInfo.GetCultureInfo("es-CL");
+
+    private string _today = string.Empty;
+    private string _assistantName = "Artemis";
+    private bool _loading = true;
+    private string? _error;
+    private List<BriefingPart> _briefing = [];
+    private List<(AlarmDto Alarm, DateTime Next)>? _alarms;
+    private List<MonitorDto>? _monitors;
+    private List<TaskDto>? _tasks;
+
     protected override async Task OnInitializedAsync()
     {
         // Restore the session on process restart: a stored refresh token means we were logged
@@ -19,6 +191,126 @@
             }
         }
 
-        Navigation.NavigateTo(AuthState.IsAuthenticated ? "/tasks" : "/login", replace: true);
+        if (!AuthState.IsAuthenticated)
+        {
+            Navigation.NavigateTo("/login", replace: true);
+            return;
+        }
+
+        var now = DateTime.Now;
+        _today = Es.TextInfo.ToTitleCase(now.ToString("dddd d 'de' MMMM", Es));
+        await LoadAsync();
     }
+
+    private async Task LoadAsync()
+    {
+        // Cada bloque carga por separado: si una llamada falla, el resto de la pantalla igual se ve.
+        var tasksTask = Safe(TaskApi.GetTasksAsync);
+        var alarmsTask = Safe(AlarmApi.GetAlarmsAsync);
+        var monitorsTask = Safe(MonitorApi.GetMonitorsAsync);
+        var identityTask = Safe(IdentityApi.GetIdentityAsync);
+        await System.Threading.Tasks.Task.WhenAll(tasksTask, alarmsTask, monitorsTask, identityTask);
+
+        _tasks = tasksTask.Result?
+            .Where(t => t.Status is TaskStatus.Pending or TaskStatus.InProgress)
+            .OrderByDescending(t => t.Status == TaskStatus.InProgress)
+            .ThenByDescending(t => t.Priority)
+            .ThenBy(t => t.Order)
+            .ToList();
+        _alarms = alarmsTask.Result?
+            .Where(a => a.IsActive && a.ScheduleAt.HasValue)
+            .Select(a => (a, AlarmSchedule.ComputeNextRing(a)))
+            .OrderBy(x => x.Item2)
+            .ToList();
+        _monitors = monitorsTask.Result?
+            .Where(m => m.IsEnabled)
+            .OrderByDescending(m => m.LastStatus == MonitorStatus.Down)
+            .ThenBy(m => m.Name)
+            .ToList();
+        if (!string.IsNullOrWhiteSpace(identityTask.Result?.Name))
+            _assistantName = identityTask.Result.Name;
+
+        if (tasksTask.Result is null || alarmsTask.Result is null || monitorsTask.Result is null)
+            _error = "No se pudo cargar parte de la información. ¿Está corriendo la Api?";
+
+        _briefing = tasksTask.Result is null && alarmsTask.Result is null && monitorsTask.Result is null
+            ? [new("No pude revisar tu día: la Api no responde.", true)]
+            : BuildBriefing();
+        _loading = false;
+    }
+
+    private static async Task<T?> Safe<T>(Func<Task<T>> call) where T : class
+    {
+        try { return await call(); }
+        catch (HttpRequestException) { return null; }
+    }
+
+    // Briefing de 1–3 frases: lo caído primero (en ámbar), después alarma y tareas.
+    private List<BriefingPart> BuildBriefing()
+    {
+        var parts = new List<BriefingPart>();
+        var down = _monitors?.Where(m => m.LastStatus == MonitorStatus.Down).Select(m => m.Name).ToList() ?? [];
+        if (down.Count > 0)
+            parts.Add(new($"{string.Join(" y ", down)} {(down.Count == 1 ? "está caído" : "están caídos")}. ", true));
+
+        if (_alarms is { Count: > 0 })
+        {
+            var (alarm, next) = _alarms[0];
+            parts.Add(new($"Tu próxima alarma es «{alarm.Name}», {FormatWhen(next).ToLower(Es)}. "));
+        }
+
+        if (_tasks is not null)
+        {
+            var inProgress = _tasks.Count(t => t.Status == TaskStatus.InProgress);
+            parts.Add(new(_tasks.Count switch
+            {
+                0 => "No tienes tareas pendientes.",
+                1 => "Tienes 1 tarea pendiente",
+                _ => $"Tienes {_tasks.Count} tareas pendientes",
+            }));
+            if (_tasks.Count > 0)
+                parts.Add(new(inProgress > 0 ? $", {inProgress} en curso." : "."));
+        }
+
+        if (parts.Count == 0)
+            parts.Add(new("Todo tranquilo por ahora."));
+        return parts;
+    }
+
+    // (Sin patrones relacionales "< 12 =>" al inicio de línea: Razor los toma por etiquetas.)
+    private static string Greeting()
+    {
+        var hour = DateTime.Now.Hour;
+        if (hour < 12) return "Buenos días";
+        return hour < 20 ? "Buenas tardes" : "Buenas noches";
+    }
+
+    private static string FormatWhen(DateTime when)
+    {
+        var day = when.Date == DateTime.Today ? "Hoy"
+            : when.Date == DateTime.Today.AddDays(1) ? "Mañana"
+            : when.ToString("ddd d", Es);
+        return $"{day} {when:HH:mm}";
+    }
+
+    private static string StatusKind(MonitorDto m) => m.LastStatus switch
+    {
+        MonitorStatus.Up => "up",
+        MonitorStatus.Down => "down",
+        _ => "unknown",
+    };
+
+    private static string StatusLabel(MonitorDto m) => m.LastStatus switch
+    {
+        MonitorStatus.Up => "Activo",
+        MonitorStatus.Down => "Caído",
+        _ => "Sin datos",
+    };
+
+    private static string MonitorMeta(MonitorDto m) => m.LastStatus switch
+    {
+        MonitorStatus.Up when m.LastResponseTimeMs.HasValue => $"{m.LastResponseTimeMs} ms",
+        MonitorStatus.Down => "caído",
+        _ => "—",
+    };
 }

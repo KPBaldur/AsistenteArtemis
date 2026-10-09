@@ -1,0 +1,9 @@
+@* Punto de estado: activo (cian), caído (coral), aviso (ámbar), sin datos (anillo gris).
+   El color nunca va solo: Label se expone a lectores de pantalla y como tooltip. *@
+<span class="status-dot status-dot--@Kind" role="img" aria-label="@Label" title="@Label"></span>
+
+@code {
+    /// <summary>"up", "down", "warning" o "unknown".</summary>
+    [Parameter] public string Kind { get; set; } = "unknown";
+    [Parameter] public string Label { get; set; } = string.Empty;
+}

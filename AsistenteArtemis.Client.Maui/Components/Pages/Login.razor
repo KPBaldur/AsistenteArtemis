@@ -4,27 +4,30 @@
 @inject AuthState AuthState
 @inject NavigationManager Navigation
 
-<h1>Iniciar sesión</h1>
+<Card Class="auth-card">
+    <div class="overline">Artemis</div>
+    <h1>Iniciar sesión</h1>
 
-<EditForm Model="_model" OnValidSubmit="SubmitAsync">
-    <div class="form-group">
-        <label>Usuario</label>
-        <InputText class="form-control" @bind-Value="_model.Username" />
-    </div>
-    <div class="form-group">
-        <label>Contraseña</label>
-        <InputText class="form-control" type="password" @bind-Value="_model.Password" />
-    </div>
+    <EditForm Model="_model" OnValidSubmit="SubmitAsync">
+        <div class="form-group">
+            <label for="login-user">Usuario</label>
+            <InputText id="login-user" class="form-control" @bind-Value="_model.Username" />
+        </div>
+        <div class="form-group">
+            <label for="login-pass">Contraseña</label>
+            <InputText id="login-pass" class="form-control" type="password" @bind-Value="_model.Password" />
+        </div>
 
-    @if (!string.IsNullOrEmpty(_error))
-    {
-        <p class="text-danger">@_error</p>
-    }
+        @if (!string.IsNullOrEmpty(_error))
+        {
+            <p class="text-danger">@_error</p>
+        }
 
-    <button type="submit" class="btn btn-primary" disabled="@_busy">Entrar</button>
-</EditForm>
+        <button type="submit" class="btn btn-primary w-100" disabled="@_busy">Entrar</button>
+    </EditForm>
 
-<p><a href="/register">¿No tenés cuenta? Registrate</a></p>
+    <p class="mt-3 mb-0"><a href="/register">¿No tenés cuenta? Registrate</a></p>
+</Card>
 
 @code {
     private readonly LoginRequest _model = new();
@@ -40,7 +43,7 @@
             var auth = await AuthApi.LoginAsync(_model);
             await TokenStore.SaveSessionAsync(auth.Token, auth.RefreshToken, auth.User.Username);
             AuthState.SetAuthenticated(auth.User.Username);
-            Navigation.NavigateTo("/tasks", replace: true);
+            Navigation.NavigateTo("/", replace: true);
         }
         catch (HttpRequestException)
         {

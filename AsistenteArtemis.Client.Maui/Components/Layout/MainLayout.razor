@@ -1,16 +1,32 @@
 @inherits LayoutComponentBase
+@inject AuthState AuthState
+@implements IDisposable
 
-<div class="page">
-    <div class="sidebar">
-        <NavMenu />
-    </div>
-
-    <main>
-        <article class="content px-4">
+@* AppShell del sistema "Luna de caza": barra lateral + contenido. Sin sesión
+   (login/registro) el contenido va centrado y sin barra. *@
+<div class="app-shell">
+    @if (AuthState.IsAuthenticated)
+    {
+        <SideNav />
+        <main class="app-content">
             @Body
-        </article>
-    </main>
+        </main>
+    }
+    else
+    {
+        <main class="app-content app-content--center">
+            @Body
+        </main>
+    }
 </div>
 
 @* Aviso de alarma sonando — visible sin importar qué pantalla esté mostrando el usuario. *@
 <AlarmPopup />
+
+@code {
+    protected override void OnInitialized() => AuthState.Changed += OnAuthChanged;
+
+    private void OnAuthChanged() => InvokeAsync(StateHasChanged);
+
+    public void Dispose() => AuthState.Changed -= OnAuthChanged;
+}

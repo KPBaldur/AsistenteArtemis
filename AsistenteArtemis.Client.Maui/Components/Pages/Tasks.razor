@@ -1,8 +1,6 @@
 @page "/tasks"
 @inject ITaskApiClient TaskApi
 @inject IAlarmApiClient AlarmApi
-@inject IAuthApiClient AuthApi
-@inject TokenStore TokenStore
 @inject AuthState AuthState
 @inject NavigationManager Navigation
 
@@ -109,8 +107,6 @@ else
             }
         </ul>
     }
-
-    <button class="btn btn-link" @onclick="LogoutAsync">Cerrar sesión</button>
 }
 
 @code {
@@ -233,26 +229,5 @@ else
     {
         await TaskApi.ToggleSubtaskAsync(subtask.Id);
         await LoadTasksAsync();
-    }
-
-    private async Task LogoutAsync()
-    {
-        var accessToken = await TokenStore.GetAccessTokenAsync();
-        var refreshToken = await TokenStore.GetRefreshTokenAsync();
-        if (!string.IsNullOrEmpty(accessToken) && !string.IsNullOrEmpty(refreshToken))
-        {
-            try
-            {
-                await AuthApi.RevokeAsync(new RefreshRequest { Token = accessToken, RefreshToken = refreshToken });
-            }
-            catch (HttpRequestException)
-            {
-                // Best-effort — still clear the local session even if the API call fails.
-            }
-        }
-
-        TokenStore.ClearTokens();
-        AuthState.SetLoggedOut();
-        Navigation.NavigateTo("/login", replace: true);
     }
 }

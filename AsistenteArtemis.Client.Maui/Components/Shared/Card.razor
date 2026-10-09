@@ -1,0 +1,25 @@
+@* Superficie base del sistema "Luna de caza": título opcional y acción a la derecha. *@
+<section class="card-ui @(Warning ? "card-ui--warning" : null) @Class" aria-label="@(Title is null ? null : Title)">
+    @if (Title is not null || Action is not null)
+    {
+        <header class="card-ui__header">
+            @if (Title is not null)
+            {
+                <h2 class="card-ui__title">@Title</h2>
+            }
+            @if (Action is not null)
+            {
+                <div class="card-ui__action">@Action</div>
+            }
+        </header>
+    }
+    @ChildContent
+</section>
+
+@code {
+    [Parameter] public string? Title { get; set; }
+    [Parameter] public RenderFragment? Action { get; set; }
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+    [Parameter] public bool Warning { get; set; }
+    [Parameter] public string? Class { get; set; }
+}

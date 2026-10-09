@@ -1,0 +1,63 @@
+@inject AuthState AuthState
+@inject IAuthApiClient AuthApi
+@inject TokenStore TokenStore
+@inject NavigationManager Navigation
+
+@* Barra lateral de solo iconos (88 px). En pantallas angostas pasa abajo (ver app.css). *@
+<nav class="sidenav" aria-label="Navegación principal">
+    <div class="sidenav__brand" title="Artemis">
+        <Icon Name="moon" />
+    </div>
+
+    @foreach (var item in Items)
+    {
+        <NavLink class="sidenav__item" href="@item.Href" Match="@item.Match"
+                 aria-label="@item.Label" title="@item.Label">
+            <Icon Name="@item.Icon" />
+        </NavLink>
+    }
+
+    <div class="sidenav__spacer"></div>
+
+    <button type="button" class="sidenav__item" @onclick="LogoutAsync"
+            aria-label="Cerrar sesión (@AuthState.Username)" title="Cerrar sesión (@AuthState.Username)">
+        <Icon Name="logout" />
+    </button>
+</nav>
+
+@code {
+    private record NavItem(string Href, string Label, string Icon, NavLinkMatch Match = NavLinkMatch.Prefix);
+
+    private static readonly NavItem[] Items =
+    [
+        new("/", "Hoy", "today", NavLinkMatch.All),
+        new("/tasks", "Tareas", "tasks"),
+        new("/alarms", "Alarmas", "alarm", NavLinkMatch.All),
+        new("/alarms/upcoming", "Próximas alarmas", "clock"),
+        new("/notes", "Notas", "notes"),
+        new("/chat", "Chat con Artemis", "chat"),
+        new("/monitor", "Sistemas", "monitor"),
+        new("/identity", "Identidad de Artemis", "sparkle"),
+    ];
+
+    private async Task LogoutAsync()
+    {
+        var accessToken = await TokenStore.GetAccessTokenAsync();
+        var refreshToken = await TokenStore.GetRefreshTokenAsync();
+        if (!string.IsNullOrEmpty(accessToken) && !string.IsNullOrEmpty(refreshToken))
+        {
+            try
+            {
+                await AuthApi.RevokeAsync(new RefreshRequest { Token = accessToken, RefreshToken = refreshToken });
+            }
+            catch (HttpRequestException)
+            {
+                // Best-effort — still clear the local session even if the API call fails.
+            }
+        }
+
+        TokenStore.ClearTokens();
+        AuthState.SetLoggedOut();
+        Navigation.NavigateTo("/login", replace: true);
+    }
+}
