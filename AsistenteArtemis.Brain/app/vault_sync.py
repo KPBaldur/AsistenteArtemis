@@ -1,7 +1,10 @@
 import asyncio
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
+
+from google.genai import errors as genai_errors
 
 from app import vault
 from app.db import SessionLocal
@@ -12,6 +15,8 @@ logger = logging.getLogger("brain.vault_sync")
 
 POLL_INTERVAL_SECONDS = 10 * 60
 _EMBED_BATCH = 50  # por debajo del tope de contenidos por request de embed_content
+_RATE_LIMIT_WAIT_SECONDS = 60  # la ventana de la cuota es de 1 minuto
+_MAX_RATE_LIMIT_RETRIES = 3
 
 # Estado del último sync, en memoria -- lo expone GET /internal/vault/status.
 last_sync: dict = {"at": None, "commit": None, "reembedded": [], "deleted": [], "error": None}
@@ -21,12 +26,26 @@ def _stored_hashes(db) -> dict[str, str]:
     return dict(db.query(VaultChunk.path, VaultChunk.content_hash).distinct().all())
 
 
+def _embed_with_backoff(texts: list[str]) -> list[list[float]]:
+    """La capa gratuita de Gemini limita los embeddings a 100 textos/minuto: un
+    sync inicial (~500 chunks) choca con el 429 enseguida. El sync corre en un
+    thread aparte, así que esperar acá no bloquea al resto del Brain."""
+    for attempt in range(_MAX_RATE_LIMIT_RETRIES + 1):
+        try:
+            return embed_texts(texts, task_type="RETRIEVAL_DOCUMENT")
+        except genai_errors.ClientError as e:
+            if e.code != 429 or attempt == _MAX_RATE_LIMIT_RETRIES:
+                raise
+            logger.info("Cuota de embeddings agotada, esperando %ds", _RATE_LIMIT_WAIT_SECONDS)
+            time.sleep(_RATE_LIMIT_WAIT_SECONDS)
+
+
 def _reembed_file(db, rel_path: str, text: str, file_hash: str) -> None:
     db.query(VaultChunk).filter(VaultChunk.path == rel_path).delete()
     chunks = vault.chunk_markdown(rel_path, text)
     for start in range(0, len(chunks), _EMBED_BATCH):
         batch = chunks[start:start + _EMBED_BATCH]
-        vectors = embed_texts([c.text for c in batch], task_type="RETRIEVAL_DOCUMENT")
+        vectors = _embed_with_backoff([c.text for c in batch])
         for chunk, vector in zip(batch, vectors):
             db.add(VaultChunk(
                 id=uuid.uuid4(), path=chunk.path, doc_type=chunk.doc_type, project=chunk.project,
