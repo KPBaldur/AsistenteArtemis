@@ -19,6 +19,14 @@
 
     <div class="sidenav__spacer"></div>
 
+    @if (MascotLauncher.IsSupported)
+    {
+        <button type="button" class="sidenav__item" @onclick="OpenMascot"
+                aria-label="Abrir la mascota de escritorio" title="Abrir la mascota de escritorio">
+            <Icon Name="mascot" />
+        </button>
+    }
+
     <button type="button" class="sidenav__item" @onclick="LogoutAsync"
             aria-label="Cerrar sesión (@AuthState.Username)" title="Cerrar sesión (@AuthState.Username)">
         <Icon Name="logout" />
@@ -39,6 +47,13 @@
         new("/monitor", "Sistemas", "monitor"),
         new("/identity", "Identidad de Artemis", "sparkle"),
     ];
+
+    // Si no se pudo abrir, Identidad muestra el motivo (MascotLauncher.LastError).
+    private void OpenMascot()
+    {
+        if (MascotLauncher.Launch() is not null)
+            Navigation.NavigateTo("/identity");
+    }
 
     private async Task LogoutAsync()
     {

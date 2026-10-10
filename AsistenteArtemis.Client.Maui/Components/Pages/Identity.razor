@@ -63,15 +63,23 @@ else
                     <span class="text-secondary-ui"> · último uso @lastUsed.ToLocalTime().ToString("g")</span>
                 }
             </p>
-            <button type="button" class="btn btn-outline-danger" disabled="@_mascotBusy" @onclick="DisconnectMascotAsync">Desconectar</button>
+            <div class="d-flex flex-wrap" style="gap: 10px;">
+                @if (MascotLauncher.IsSupported)
+                {
+                    <button type="button" class="btn btn-primary" @onclick="OpenMascot">
+                        @(MascotLauncher.IsRunning() ? "Mascota abierta" : "Abrir mascota")
+                    </button>
+                }
+                <button type="button" class="btn btn-outline-danger" disabled="@_mascotBusy" @onclick="DisconnectMascotAsync">Desconectar</button>
+            </div>
         }
         else
         {
             <button type="button" class="btn btn-primary" disabled="@_mascotBusy" @onclick="ConnectMascotAsync">Conectar mascota</button>
         }
-        @if (!string.IsNullOrEmpty(_mascotMessage))
+        @if (!string.IsNullOrEmpty(_mascotMessage ?? MascotLauncher.LastError))
         {
-            <p class="mt-2 mb-0">@_mascotMessage</p>
+            <p class="mt-2 mb-0">@(_mascotMessage ?? MascotLauncher.LastError)</p>
         }
     </Card>
 }
@@ -142,6 +150,12 @@ else
         {
             _mascotBusy = false;
         }
+    }
+
+    private void OpenMascot()
+    {
+        var error = MascotLauncher.Launch();
+        _mascotMessage = error ?? "Abriendo la mascota… aparece en la esquina inferior derecha.";
     }
 
     private async Task DisconnectMascotAsync()

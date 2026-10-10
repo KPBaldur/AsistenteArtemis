@@ -74,14 +74,31 @@ var _drag_offset := Vector2i.ZERO
 
 
 func _ready() -> void:
+	_write_pid_file()
 	_setup_window()
 	_load_avatar()
 	_api = ApiClient.new()
 	add_child(_api)
 	_bubble = Bubble.new()
+	_bubble.visible = false
 	add_child(_bubble)
 	_setup_menu()
 	_handle_screenshot_arg()
+
+
+# La app MAUI lee este archivo para saber si la mascota ya está abierta (botón "Abrir
+# mascota") sin confundirla con otro proceso de Godot, como el editor.
+const PID_PATH := "user://mascot.pid"
+
+func _write_pid_file() -> void:
+	var file := FileAccess.open(PID_PATH, FileAccess.WRITE)
+	if file:
+		file.store_string(str(OS.get_process_id()))
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_PREDELETE:
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(PID_PATH))
 
 
 # --- Ventana -----------------------------------------------------------------
@@ -287,6 +304,9 @@ func _open(window_script: GDScript, extra: Dictionary = {}) -> void:
 		say(ApiClient.NOT_LINKED_MESSAGE, "error", 7.0)
 		return
 	var window: Window = window_script.new()
+	# Oculta hasta terminar de configurarla (popup_next_to la muestra): una Window entra a la
+	# escena visible por defecto y Godot crea la ventana nativa con la configuración de fábrica.
+	window.visible = false
 	add_child(window)
 	if window.has_signal("saved"):
 		window.saved.connect(func(message: String): say(message, "ok"))
@@ -350,6 +370,7 @@ func _handle_screenshot_arg() -> void:
 			var entry: Array = forms.get(arg.trim_prefix("--open="), [])
 			if not entry.is_empty():
 				var window: Window = entry[0].new()
+				window.visible = false
 				add_child(window)
 				window.open(_api, _window_rect(), entry[1])
 				target = window
