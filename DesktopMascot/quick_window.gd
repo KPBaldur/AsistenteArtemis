@@ -19,9 +19,12 @@ func setup(window_title: String, window_size: Vector2i, api_client: ApiClient) -
 	api = api_client
 	title = window_title
 	size = window_size
+	# Opaca a propósito: con GL Compatibility en Windows, una ventana secundaria transparente
+	# se muestra vacía (solo la ventana principal de la mascota soporta transparencia real).
+	# Por eso el panel no lleva esquinas redondeadas: llena la ventana completa.
 	borderless = true
-	transparent = true
-	transparent_bg = true
+	transparent = false
+	transparent_bg = false
 	always_on_top = true
 	unresizable = true
 	theme = LunaTheme.get_theme()
@@ -29,6 +32,7 @@ func setup(window_title: String, window_size: Vector2i, api_client: ApiClient) -
 
 	var panel := PanelContainer.new()
 	panel.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	panel.add_theme_stylebox_override("panel", LunaTheme.window_panel())
 	add_child(panel)
 
 	var root := VBoxContainer.new()

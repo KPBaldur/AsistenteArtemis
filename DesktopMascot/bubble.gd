@@ -13,9 +13,11 @@ var _timer: Timer
 
 
 func _ready() -> void:
+	# Opaca: las ventanas secundarias transparentes se ven vacías con GL Compatibility en
+	# Windows (ver quick_window.gd).
 	borderless = true
-	transparent = true
-	transparent_bg = true
+	transparent = false
+	transparent_bg = false
 	always_on_top = true
 	unfocusable = true
 	unresizable = true
@@ -23,16 +25,7 @@ func _ready() -> void:
 	theme = LunaTheme.get_theme()
 
 	_panel = PanelContainer.new()
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(LunaTheme.SURFACE, 0.96)
-	style.border_color = LunaTheme.BORDER_STRONG
-	style.set_border_width_all(1)
-	style.set_corner_radius_all(14)
-	style.content_margin_left = 14
-	style.content_margin_right = 14
-	style.content_margin_top = 10
-	style.content_margin_bottom = 10
-	_panel.add_theme_stylebox_override("panel", style)
+	_panel.add_theme_stylebox_override("panel", LunaTheme.window_panel(LunaTheme.BORDER_STRONG, 14, 10))
 	add_child(_panel)
 
 	_label = Label.new()

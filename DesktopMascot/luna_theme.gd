@@ -35,6 +35,12 @@ static func mono_font() -> FontFile:
 	return _mono
 
 
+## Fondo de las ventanitas: rectangular (las ventanas secundarias no pueden ser
+## transparentes, así que unas esquinas redondeadas dejarían ver el color de limpieza).
+static func window_panel(border := BORDER_STRONG, pad_x := 18, pad_y := 16) -> StyleBoxFlat:
+	return _box(BG, border, 0, pad_x, pad_y)
+
+
 static func _load_font(path: String) -> FontFile:
 	var font := FontFile.new()
 	if font.load_dynamic_font(path) != OK:

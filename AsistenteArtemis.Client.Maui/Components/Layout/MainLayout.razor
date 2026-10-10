@@ -1,5 +1,6 @@
 @inherits LayoutComponentBase
 @inject AuthState AuthState
+@inject MascotConnector MascotConnector
 @implements IDisposable
 
 @* AppShell del sistema "Luna de caza": barra lateral + contenido. Sin sesión
@@ -24,9 +25,23 @@
 <AlarmPopup />
 
 @code {
-    protected override void OnInitialized() => AuthState.Changed += OnAuthChanged;
+    protected override void OnInitialized()
+    {
+        AuthState.Changed += OnAuthChanged;
+        if (AuthState.IsAuthenticated)
+            _ = MascotConnector.EnsureConnectedAsync();
+    }
 
-    private void OnAuthChanged() => InvokeAsync(StateHasChanged);
+    // Con sesión, la mascota se conecta sola (a pedido del usuario, 2026-10-09); al cerrar
+    // sesión, la próxima vuelve a verificar.
+    private void OnAuthChanged()
+    {
+        if (AuthState.IsAuthenticated)
+            _ = MascotConnector.EnsureConnectedAsync();
+        else
+            MascotConnector.ResetSessionCheck();
+        InvokeAsync(StateHasChanged);
+    }
 
     public void Dispose() => AuthState.Changed -= OnAuthChanged;
 }

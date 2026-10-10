@@ -1,6 +1,6 @@
 @page "/identity"
 @inject IAssistantIdentityApiClient IdentityApi
-@inject IDeviceTokenApiClient DeviceTokenApi
+@inject MascotConnector MascotConnector
 @inject AuthState AuthState
 @inject NavigationManager Navigation
 
@@ -49,8 +49,9 @@ else
 
     <Card Title="Mascota de escritorio" Class="mt-4">
         <p class="text-secondary-ui">
-            Conecta la mascota para que pueda crear alarmas, notas y tareas y mostrar el estado de
-            tus servidores. Se le entrega un token propio que puedes revocar cuando quieras.
+            La app conecta la mascota sola al iniciar sesión, para que pueda crear alarmas, notas y
+            tareas y mostrar el estado de tus servidores. Usa un token propio: aquí puedes
+            reconectarla o revocarlo cuando quieras.
         </p>
         @if (_mascotDevices is { Count: > 0 } && MascotLink.IsLinked)
         {
@@ -115,9 +116,7 @@ else
     {
         try
         {
-            _mascotDevices = (await DeviceTokenApi.GetDeviceTokensAsync())
-                .Where(d => d.Name == MascotLink.DeviceName && d.RevokedAt is null)
-                .ToList();
+            _mascotDevices = await MascotConnector.GetActiveTokensAsync();
         }
         catch (HttpRequestException)
         {
@@ -131,12 +130,7 @@ else
         _mascotMessage = null;
         try
         {
-            // Un solo token activo por mascota: los anteriores se revocan al reconectar.
-            foreach (var old in _mascotDevices ?? [])
-                await DeviceTokenApi.RevokeDeviceTokenAsync(old.Id);
-
-            var created = await DeviceTokenApi.CreateDeviceTokenAsync(new DeviceTokenCreateDto { Name = MascotLink.DeviceName });
-            MascotLink.Write(created.Token);
+            await MascotConnector.ReconnectAsync(_mascotDevices);
             _mascotMessage = "Listo. La mascota ya puede usar tu cuenta (si estaba abierta, lo nota en el próximo uso).";
             await LoadMascotDevicesAsync();
         }
@@ -156,9 +150,7 @@ else
         _mascotMessage = null;
         try
         {
-            foreach (var device in _mascotDevices ?? [])
-                await DeviceTokenApi.RevokeDeviceTokenAsync(device.Id);
-            MascotLink.Remove();
+            await MascotConnector.DisconnectAsync();
             _mascotMessage = "Mascota desconectada: su token quedó revocado.";
             await LoadMascotDevicesAsync();
         }

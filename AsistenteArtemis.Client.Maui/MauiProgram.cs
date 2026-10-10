@@ -22,6 +22,7 @@ public static class MauiProgram
 		builder.Services.AddSingleton<TokenStore>();
 		builder.Services.AddSingleton<AuthState>();
 		builder.Services.AddSingleton<AlarmNotificationService>();
+		builder.Services.AddSingleton<MascotConnector>();
 		builder.Services.AddTransient<AuthDelegatingHandler>();
 
 		// AuthApiClient carries no bearer token (login/register/refresh don't need one), so no
