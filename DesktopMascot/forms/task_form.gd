@@ -80,11 +80,11 @@ func _submit() -> void:
 		var vault_result: Dictionary = await api.post_json("Vault/pendiente", { project = slug, text = task_title })
 		if not vault_result.ok:
 			# La tarea ya quedó en la app: no se reintenta para no duplicarla.
-			saved.emit("%s Pero no pude anotarla en el cerebro: %s" % [summary, vault_result.error])
+			saved.emit("%s Pero no pude anotarla en el cerebro: %s" % [summary, vault_result.error], _category())
 			queue_free()
 			return
 		summary += " También quedó en los pendientes de %s." % _project.selected_name()
-	saved.emit(summary)
+	saved.emit(summary, _category())
 	queue_free()
 
 
@@ -92,3 +92,8 @@ func _load_projects() -> void:
 	var error: String = await _project.load_projects(api)
 	if not error.is_empty():
 		set_status("Sin lista de proyectos: %s" % error)
+
+
+# Un recordatorio es una tarea con hora (para la animación de la mascota, ver main.gd).
+func _category() -> String:
+	return "reminder_created" if _with_time.button_pressed else "task_created"

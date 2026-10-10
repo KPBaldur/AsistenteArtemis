@@ -25,3 +25,8 @@ export_presets.cfg
 !.vscode/extensions.json
 .idea/
 .DS_Store
+
+# Animaciones de Mixamo: los términos de Adobe no permiten redistribuir los archivos sueltos
+# (ver DesktopMascot/animations/README.md). Viven solo en cada equipo.
+DesktopMascot/animations/*.fbx
+DesktopMascot/avatars/*/animations/*.fbx

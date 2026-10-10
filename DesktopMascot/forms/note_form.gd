@@ -38,5 +38,5 @@ func _submit() -> void:
 		_save.disabled = false
 		set_status(result.error, "error")
 		return
-	saved.emit("Listo: guardé la nota «%s»." % note_title)
+	saved.emit("Listo: guardé la nota «%s»." % note_title, "note_saved")
 	queue_free()

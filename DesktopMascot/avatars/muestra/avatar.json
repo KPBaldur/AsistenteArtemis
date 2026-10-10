@@ -1,0 +1,18 @@
+{
+	"name": "Muestra de pixiv",
+	"model": "res://models/sample.vrm",
+	"animations": {
+		"greet": ["wave"],
+		"click": ["wave"],
+		"celebrate": ["wave"],
+		"task_created": [],
+		"reminder_created": [],
+		"alarm_created": [],
+		"note_saved": [],
+		"comment_saved": [],
+		"task_done": [],
+		"alarm_ringing": [],
+		"server_down": [],
+		"idle": ["HipHopDancing"]
+	}
+}

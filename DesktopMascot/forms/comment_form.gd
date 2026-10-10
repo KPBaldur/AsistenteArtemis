@@ -48,5 +48,5 @@ func _submit() -> void:
 		_save.disabled = false
 		set_status(result.error, "error")
 		return
-	saved.emit("Listo: lo anoté en la bitácora de %s." % _project.selected_name())
+	saved.emit("Listo: lo anoté en la bitácora de %s." % _project.selected_name(), "comment_saved")
 	queue_free()

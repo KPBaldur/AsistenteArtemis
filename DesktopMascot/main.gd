@@ -3,12 +3,14 @@ extends Node3D
 ## Mascota de escritorio de Artemis: ventana transparente, sin bordes y siempre
 ## encima, con un avatar VRM. Dos capas de animación que se mezclan:
 ## - procedural: brazos abajo, respiración, balanceo, parpadeo y mirada al cursor;
-## - clips VRMA (res://animations/*.vrma, ver vrma_clip.gd) que se disparan con eventos:
-##   saludar al abrir, reaccionar al clic, celebrar al guardar algo.
+## - clips (.vrma o .fbx de Mixamo, ver anim_clip.gd) que se disparan por categoría de evento.
+## El avatar activo es un perfil (avatars/<id>/avatar.json): qué modelo cargar y qué
+## animaciones de la biblioteca compartida (res://animations) usar en cada categoría.
 ## Solo la silueta del personaje recibe el mouse; el resto de la ventana deja
 ## pasar los clics al escritorio.
 
-const AVATAR_PATH := "res://models/sample.vrm"
+const AVATARS_DIR := "res://avatars"
+const DEFAULT_AVATAR := "muestra"
 const ANIMATIONS_DIR := "res://animations"
 const CONFIG_PATH := "user://mascot.cfg"
 const WINDOW_SIZE := Vector2i(260, 400)
@@ -33,16 +35,35 @@ const BLINK_DURATION := 0.16
 
 const CLIP_FADE_IN := 0.3
 const CLIP_FADE_OUT := 0.4
-# Qué clips se usan para cada evento, por nombre de archivo (sin .vrma), en orden de
-# preferencia; "click" elige uno al azar entre los que existan. Si ninguno existe, se usa
-# cualquier clip disponible.
-const CLIP_ROLES := {
-	"greet": ["greeting", "wave"],
-	"celebrate": ["peace", "celebrate", "spin", "model_pose", "wave"],
-	"click": ["peace", "greeting", "model_pose", "show_body", "spin", "wave"],
+const HIPS_HORIZONTAL_FACTOR := 0.3
+
+# Categorías de animación: cada avatar.json asigna a cada una una lista de clips (por nombre
+# de archivo, sin extensión) y se elige uno al azar. Las marcadas "pendiente" necesitan que la
+# Api avise del evento a la mascota (PresenceHub, R5) y todavía no se disparan.
+const ANIMATION_CATEGORIES := {
+	"greet": "Al abrir la mascota",
+	"click": "Clic sobre la mascota",
+	"celebrate": "Celebrar (respaldo de los guardados)",
+	"task_created": "Tarea creada",
+	"reminder_created": "Recordatorio creado",
+	"alarm_created": "Alarma creada",
+	"note_saved": "Nota guardada",
+	"comment_saved": "Comentario de proyecto",
+	"task_done": "Tarea completada (pendiente)",
+	"alarm_ringing": "Alarma sonando (pendiente)",
+	"server_down": "Servidor caído (pendiente)",
+	"idle": "Reposo, de vez en cuando",
 }
+# Si una categoría no tiene clips, se prueba con esta.
+const CATEGORY_FALLBACK := {
+	"task_created": "celebrate", "reminder_created": "celebrate", "alarm_created": "celebrate",
+	"note_saved": "celebrate", "comment_saved": "celebrate", "task_done": "celebrate",
+}
+const IDLE_MIN_SECONDS := 90.0
+const IDLE_MAX_SECONDS := 240.0
 
 enum MenuItem { NEW_ALARM, NEW_NOTE, NEW_TASK, NEW_REMINDER, PROJECT_COMMENT, SERVERS, RESET_POSITION, QUIT }
+const ANIMATION_MENU_BASE := 1000  # ids del submenú "Animaciones": base + índice del clip
 
 const LunaTheme := preload("res://luna_theme.gd")
 const ApiClient := preload("res://api_client.gd")
@@ -52,10 +73,13 @@ const AlarmForm := preload("res://forms/alarm_form.gd")
 const NoteForm := preload("res://forms/note_form.gd")
 const TaskForm := preload("res://forms/task_form.gd")
 const CommentForm := preload("res://forms/comment_form.gd")
-const VrmaClip := preload("res://vrma_clip.gd")
+const AnimClip := preload("res://anim_clip.gd")
 
 @onready var _camera: Camera3D = $Camera3D
 @onready var _menu: PopupMenu = $ContextMenu
+var _animations_menu: PopupMenu
+
+var _avatar := {}       # perfil activo (avatar.json)
 
 var _api: ApiClient
 var _bubble: Bubble
@@ -68,8 +92,8 @@ var _hips_height := 1.0
 var _posed := {}        # huesos tocados en el último frame (para devolverlos al reposo)
 var _avatar_meshes: Array[MeshInstance3D] = []
 
-var _clips := {}        # nombre de archivo -> VrmaClip
-var _clip: VrmaClip
+var _clips := {}        # nombre de archivo (sin extensión) -> AnimClip
+var _clip: AnimClip
 var _clip_t := 0.0
 var _clip_expressions := {}
 
@@ -88,7 +112,8 @@ var _press_at := Vector2i.ZERO
 func _ready() -> void:
 	_write_pid_file()
 	_setup_window()
-	_load_avatar()
+	_avatar = _load_avatar_profile()
+	_load_avatar(_avatar.model)
 	_load_clips()
 	_api = ApiClient.new()
 	add_child(_api)
@@ -98,6 +123,7 @@ func _ready() -> void:
 	_setup_menu()
 	if not _has_test_args():
 		get_tree().create_timer(1.0).timeout.connect(play_role.bind("greet"))
+		_schedule_idle()
 	_handle_screenshot_arg()
 
 
@@ -146,7 +172,9 @@ func _load_saved_position() -> Vector2i:
 
 
 func _save_position() -> void:
+	# Cargar antes de guardar: mascot.cfg también guarda el avatar elegido.
 	var cfg := ConfigFile.new()
+	cfg.load(CONFIG_PATH)
 	cfg.set_value("window", "position", get_window().position)
 	cfg.save(CONFIG_PATH)
 
@@ -178,10 +206,35 @@ func _update_mouse_passthrough() -> void:
 
 # --- Avatar ------------------------------------------------------------------
 
-func _load_avatar() -> void:
+# Perfil del avatar activo: [avatar] id en mascot.cfg (o "muestra"). "model" puede ser res://,
+# una ruta absoluta o relativa a la carpeta del avatar.
+func _load_avatar_profile() -> Dictionary:
+	var cfg := ConfigFile.new()
+	cfg.load(CONFIG_PATH)
+	var avatar_id: String = cfg.get_value("avatar", "id", DEFAULT_AVATAR)
+	var folder := AVATARS_DIR.path_join(avatar_id)
+	var profile = JSON.parse_string(FileAccess.get_file_as_string(folder.path_join("avatar.json")))
+	if not profile is Dictionary:
+		if avatar_id != DEFAULT_AVATAR:
+			push_warning("Avatar «%s» sin avatar.json válido; uso «%s»" % [avatar_id, DEFAULT_AVATAR])
+			cfg.set_value("avatar", "id", DEFAULT_AVATAR)
+			cfg.save(CONFIG_PATH)
+			return _load_avatar_profile()
+		profile = {}
+	var model: String = profile.get("model", "res://models/sample.vrm")
+	if model.is_relative_path() and not model.begins_with("res://"):
+		model = folder.path_join(model)
+	profile.model = model
+	profile.id = avatar_id
+	if not profile.get("animations") is Dictionary:
+		profile.animations = {}
+	return profile
+
+
+func _load_avatar(model_path: String) -> void:
 	var gltf_doc := GLTFDocument.new()
 	var gltf_state := GLTFState.new()
-	var err := gltf_doc.append_from_file(AVATAR_PATH, gltf_state)
+	var err := gltf_doc.append_from_file(model_path, gltf_state)
 	if err != OK:
 		push_error("Error cargando el VRM (append_from_file): %s" % err)
 		return
@@ -268,16 +321,22 @@ func _set_expression(preset: String, value: float) -> void:
 
 # --- Clips VRMA -----------------------------------------------------------------
 
+# Biblioteca compartida (sirve para cualquier avatar VRM) + animaciones propias del avatar,
+# si su carpeta trae una subcarpeta animations/.
 func _load_clips() -> void:
-	var dir := DirAccess.open(ANIMATIONS_DIR)
-	if dir == null:
-		return
-	for file in dir.get_files():
-		if file.get_extension().to_lower() != "vrma":
+	for dir_path in [ANIMATIONS_DIR, AVATARS_DIR.path_join(_avatar.id).path_join("animations")]:
+		var dir := DirAccess.open(dir_path)
+		if dir == null:
 			continue
-		var clip = VrmaClip.load_file(ANIMATIONS_DIR.path_join(file))
-		if clip:
-			_clips[clip.name] = clip
+		for file in dir.get_files():
+			if not AnimClip.is_supported(file):
+				continue
+			var clip = AnimClip.load_file(dir_path.path_join(file))
+			if clip:
+				_clips[clip.name] = clip
+	var names := _clips.keys()
+	names.sort()
+	print("Animaciones cargadas: ", names)
 
 
 func play_clip(clip_name: String) -> void:
@@ -287,14 +346,24 @@ func play_clip(clip_name: String) -> void:
 	_clip_t = 0.0
 
 
-## Dispara la animación de un evento ("greet", "celebrate", "click"); ver CLIP_ROLES.
-func play_role(role: String) -> void:
-	var candidates: Array = CLIP_ROLES.get(role, []).filter(func(n): return _clips.has(n))
+## Dispara una animación de la categoría (ver ANIMATION_CATEGORIES), al azar entre las que el
+## avatar asigna; si no tiene ninguna cargada, prueba la categoría de respaldo.
+func play_role(category: String) -> void:
+	var assigned: Array = _avatar.animations.get(category, [])
+	var candidates := assigned.filter(func(n): return _clips.has(n))
 	if candidates.is_empty():
-		candidates = _clips.keys()
-	if candidates.is_empty():
+		if CATEGORY_FALLBACK.has(category):
+			play_role(CATEGORY_FALLBACK[category])
 		return
-	play_clip(candidates.pick_random() if role == "click" else candidates[0])
+	play_clip(candidates.pick_random())
+
+
+# Cada tanto, si no está haciendo nada, una animación de reposo.
+func _schedule_idle() -> void:
+	get_tree().create_timer(randf_range(IDLE_MIN_SECONDS, IDLE_MAX_SECONDS)).timeout.connect(func():
+		if _clip == null and not _dragging:
+			play_role("idle")
+		_schedule_idle())
 
 
 # Peso del clip activo: entra y sale con fundido para no saltar desde la pose procedural.
@@ -327,6 +396,9 @@ func _animate_body(delta: float) -> void:
 			var base: Quaternion = pose.get(bone_name, Quaternion.IDENTITY)
 			pose[bone_name] = base.slerp(clip_pose[bone_name], weight)
 		hips_offset = _clip.sample_hips_offset(_clip_t) * (_hips_height / _clip.hips_rest_height) * weight
+		# La ventana es angosta: el desplazamiento lateral y de profundidad se atenúa para que
+		# un baile no saque al avatar del cuadro; el vertical (saltos, agacharse) queda entero.
+		hips_offset *= Vector3(HIPS_HORIZONTAL_FACTOR, 1.0, HIPS_HORIZONTAL_FACTOR)
 		_clip_expressions = _clip.sample_expressions(_clip_t)
 	else:
 		_clip_expressions = {}
@@ -438,10 +510,37 @@ func _setup_menu() -> void:
 	_menu.add_item("Comentario de proyecto…", MenuItem.PROJECT_COMMENT)
 	_menu.add_separator("Ver")
 	_menu.add_item("Estado de servidores", MenuItem.SERVERS)
+	_animations_menu = PopupMenu.new()
+	_animations_menu.theme = LunaTheme.get_theme()
+	_menu.add_child(_animations_menu)
+	_animations_menu.id_pressed.connect(_on_animation_menu_pressed)
+	_menu.add_submenu_node_item("Animaciones", _animations_menu)
+	_fill_animations_menu()
 	_menu.add_separator()
 	_menu.add_item("Volver a la esquina", MenuItem.RESET_POSITION)
 	_menu.add_item("Salir", MenuItem.QUIT)
 	_menu.id_pressed.connect(_on_menu_id_pressed)
+
+
+# Submenú para probar cualquier animación cargada (con su duración).
+func _fill_animations_menu() -> void:
+	_animations_menu.clear()
+	var names := _clips.keys()
+	names.sort()
+	if names.is_empty():
+		_animations_menu.add_item("(no hay animaciones en DesktopMascot/animations)")
+		_animations_menu.set_item_disabled(0, true)
+		return
+	for i in names.size():
+		var clip: AnimClip = _clips[names[i]]
+		_animations_menu.add_item("%s  ·  %.1f s" % [names[i], clip.duration], ANIMATION_MENU_BASE + i)
+		_animations_menu.set_item_metadata(i, names[i])
+
+
+func _on_animation_menu_pressed(id: int) -> void:
+	var index := _animations_menu.get_item_index(id)
+	if index >= 0:
+		play_clip(str(_animations_menu.get_item_metadata(index)))
 
 
 func _window_rect() -> Rect2i:
@@ -464,9 +563,9 @@ func _open(window_script: GDScript, extra: Dictionary = {}) -> void:
 	window.visible = false
 	add_child(window)
 	if window.has_signal("saved"):
-		window.saved.connect(func(message: String):
+		window.saved.connect(func(message: String, category: String):
 			say(message, "ok")
-			play_role("celebrate"))
+			play_role(category))
 	window.open(_api, _window_rect(), extra)
 
 

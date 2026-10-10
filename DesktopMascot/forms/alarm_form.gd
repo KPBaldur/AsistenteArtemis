@@ -72,7 +72,7 @@ func _submit() -> void:
 		_save.disabled = false
 		set_status(result.error, "error")
 		return
-	saved.emit(summary)
+	saved.emit(summary, "alarm_created")
 	queue_free()
 
 

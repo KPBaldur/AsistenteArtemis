@@ -7,7 +7,7 @@ extends Window
 const LunaTheme := preload("res://luna_theme.gd")
 const ApiClient := preload("res://api_client.gd")
 
-signal saved(message: String)
+signal saved(message: String, category: String)  # category: ver ANIMATION_CATEGORIES en main.gd
 
 var api: ApiClient
 var body: VBoxContainer
