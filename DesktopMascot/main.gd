@@ -16,12 +16,11 @@ const CONFIG_PATH := "user://mascot.cfg"
 const WINDOW_SIZE := Vector2i(260, 400)
 const SCREEN_MARGIN := 12
 
-# Huesos auxiliares de este modelo de VRoid (manga de la polera y corrección del brazo) que
-# cuelgan del hombro y siguen al brazo por VRMC_node_constraint, que aquí no se evalúa: se
-# les copia la rotación del brazo. En otro modelo simplemente no existen y se ignoran.
-const ARM_FOLLOWERS := {
-	"leftUpperArm": ["J_Aim_L_TopsUpperArm", "J_Aim_L_Shoulder"],
-	"rightUpperArm": ["J_Aim_R_TopsUpperArm", "J_Aim_R_Shoulder"],
+const AXES := {
+	"PositiveX": Vector3.RIGHT, "NegativeX": Vector3.LEFT,
+	"PositiveY": Vector3.UP, "NegativeY": Vector3.DOWN,
+	"PositiveZ": Vector3.BACK, "NegativeZ": Vector3.FORWARD,
+	"X": Vector3.RIGHT, "Y": Vector3.UP, "Z": Vector3.BACK,
 }
 
 const SHOULDER_DOWN_DEGREES := 12.0
@@ -86,7 +85,7 @@ var _bubble: Bubble
 
 var _skeleton: Skeleton3D
 var _human := {}        # hueso humanoide VRM ("hips", "leftUpperArm"…) -> índice en el esqueleto
-var _followers := {}    # hueso humanoide -> índices de huesos que copian su rotación
+var _constraints := []  # VRMC_node_constraint (aim/roll) ordenadas de padres a hijos
 var _expressions := {}  # preset VRM ("blink", "happy"…) -> [[MeshInstance3D, blend shape, peso], …]
 var _hips_height := 1.0
 var _posed := {}        # huesos tocados en el último frame (para devolverlos al reposo)
@@ -277,16 +276,78 @@ func _map_humanoid(state: GLTFState) -> void:
 		if idx >= 0:
 			_human[bone_name] = idx
 
-	for bone_name in ARM_FOLLOWERS:
-		var found := []
-		for follower in ARM_FOLLOWERS[bone_name]:
-			var idx := _skeleton.find_bone(follower)
-			if idx >= 0:
-				found.append(idx)
-		_followers[bone_name] = found
+	_map_constraints(state)
 
 	if _human.has("hips"):
 		_hips_height = maxf(_skeleton.get_bone_global_rest(_human.hips).origin.y, 0.01)
+
+
+# VRMC_node_constraint: huesos auxiliares que en el modelo original siguen a otros (la manga
+# apunta al codo, el short al muslo, el antebrazo copia parte del giro de la mano). Sin esto la
+# ropa se queda quieta mientras el cuerpo se mueve.
+func _map_constraints(state: GLTFState) -> void:
+	var json_nodes: Array = state.json.get("nodes", [])
+	var gltf_nodes := state.get_nodes()
+	var bone_of := func(node_idx: int) -> int:
+		if node_idx < 0 or node_idx >= gltf_nodes.size():
+			return -1
+		return _skeleton.find_bone((gltf_nodes[node_idx] as GLTFNode).resource_name)
+
+	for i in json_nodes.size():
+		var constraint: Dictionary = json_nodes[i].get("extensions", {}).get("VRMC_node_constraint", {}).get("constraint", {})
+		for kind in ["aim", "roll"]:
+			if not constraint.has(kind):
+				continue
+			var spec: Dictionary = constraint[kind]
+			var dst: int = bone_of.call(i)
+			var src: int = bone_of.call(int(spec.get("source", -1)))
+			var axis: Vector3 = AXES.get(spec.get("aimAxis" if kind == "aim" else "rollAxis", ""), Vector3.ZERO)
+			if dst < 0 or src < 0 or axis == Vector3.ZERO:
+				continue
+			_constraints.append({
+				kind = kind, dst = dst, src = src, axis = axis,
+				weight = float(spec.get("weight", 1.0)),
+				dst_rest = _skeleton.get_bone_rest(dst).basis.get_rotation_quaternion(),
+				src_rest = _skeleton.get_bone_rest(src).basis.get_rotation_quaternion(),
+				depth = _bone_depth(dst),
+			})
+	# Padres primero: una restricción puede colgar de otro hueso restringido.
+	_constraints.sort_custom(func(a, b): return a.depth < b.depth)
+
+
+func _bone_depth(idx: int) -> int:
+	var depth := 0
+	while _skeleton.get_bone_parent(idx) >= 0:
+		idx = _skeleton.get_bone_parent(idx)
+		depth += 1
+	return depth
+
+
+# Misma matemática que three-vrm (VRMAimConstraint / VRMRollConstraint).
+func _apply_constraints() -> void:
+	for c in _constraints:
+		var dst_rest: Quaternion = c.dst_rest
+		var pose: Quaternion
+		if c.kind == "aim":
+			# Girar el hueso para que su eje "aimAxis" apunte hacia el hueso fuente.
+			var parent := _skeleton.get_bone_parent(c.dst)
+			var parent_pose := _skeleton.get_bone_global_pose(parent) if parent >= 0 else Transform3D.IDENTITY
+			var parent_rot := parent_pose.basis.get_rotation_quaternion()
+			var dst_pos := (parent_pose * _skeleton.get_bone_rest(c.dst)).origin
+			var to := _skeleton.get_bone_global_pose(c.src).origin - dst_pos
+			var from: Vector3 = (parent_rot * dst_rest) * c.axis
+			if to.length_squared() < 1e-10:
+				continue
+			var turn := Quaternion(from.normalized(), to.normalized())
+			var target := parent_rot.inverse() * (turn * parent_rot * dst_rest)
+			pose = dst_rest.slerp(target, c.weight)
+		else:
+			# Copiar solo el giro de la fuente alrededor de "rollAxis" (sin el balanceo).
+			var src_delta := dst_rest.inverse() * _skeleton.get_bone_pose_rotation(c.src) * (c.src_rest as Quaternion).inverse() * dst_rest
+			var swing_inv := Quaternion((src_delta * c.axis).normalized(), c.axis)
+			var twist := swing_inv * src_delta
+			pose = dst_rest * Quaternion.IDENTITY.slerp(twist, c.weight)
+		_skeleton.set_bone_pose_rotation(c.dst, pose)
 
 
 # Expresiones VRM 1.0: cada preset mueve uno o más blend shapes con un peso. Las mallas se
@@ -415,8 +476,6 @@ func _animate_body(delta: float) -> void:
 		if _human.has(bone_name):
 			_pose_bone(_human[bone_name], pose[bone_name])
 			posed_now[bone_name] = true
-			for follower in _followers.get(bone_name, []):
-				_pose_bone(follower, pose[bone_name])
 	# Lo que movió el clip y ya no se mueve (piernas, dedos…) vuelve al reposo.
 	for bone_name in _posed:
 		if not posed_now.has(bone_name) and _human.has(bone_name):
@@ -428,6 +487,9 @@ func _animate_body(delta: float) -> void:
 		var parent := _skeleton.get_bone_parent(idx)
 		var parent_basis := _skeleton.get_bone_global_rest(parent).basis if parent >= 0 else Basis.IDENTITY
 		_skeleton.set_bone_pose_position(idx, _skeleton.get_bone_rest(idx).origin + parent_basis.inverse() * hips_offset)
+
+	# Al final: los huesos auxiliares (ropa, giros de antebrazo) siguen a la pose ya armada.
+	_apply_constraints()
 
 
 # Pose procedural en el espacio normalizado (rotaciones en ejes del mundo respecto del
