@@ -376,6 +376,61 @@ table { color: var(--color-text); }
 
 .today-header h1 { margin: 4px 0 0; }
 
+/* --- Identidad: categorías de animación de la mascota ------------------------------ */
+.category-row {
+    padding: 12px 0;
+    border-top: 1px solid var(--color-divider);
+}
+
+.category-row__head {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+
+.category-row__label { color: var(--color-text); font-weight: 500; }
+
+.chip-list {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 6px 4px 12px;
+    border-radius: var(--radius-pill);
+    background: var(--color-surface-raised);
+    color: var(--color-silver);
+    font-size: 13px;
+}
+
+.chip__remove {
+    border: 0;
+    background: transparent;
+    color: var(--color-text-secondary);
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    line-height: 1;
+}
+
+.chip__remove:hover { color: var(--color-danger); background: rgba(240, 113, 107, .12); }
+
+.chip-add {
+    width: auto;
+    min-height: 32px;
+    padding-top: 2px;
+    padding-bottom: 2px;
+    border-radius: var(--radius-pill);
+    font-size: 13px;
+}
+
 .briefing {
     display: flex;
     gap: 20px;

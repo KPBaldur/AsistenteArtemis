@@ -13,7 +13,7 @@ public static class MascotLauncher
 {
     private const string GodotFileName = "Godot_v4.7.2-stable_win64.exe";
 
-    private static string UserDataDir => Path.Combine(
+    public static string UserDataDir => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "Godot", "app_userdata", "DesktopMascot");
 
@@ -70,7 +70,7 @@ public static class MascotLauncher
         return null;
     }
 
-    private static string? FindProjectDir()
+    public static string? FindProjectDir()
     {
         var fromEnv = Environment.GetEnvironmentVariable("ARTEMIS_MASCOT_PATH");
         if (!string.IsNullOrWhiteSpace(fromEnv) && File.Exists(Path.Combine(fromEnv, "project.godot")))

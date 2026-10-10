@@ -1,0 +1,260 @@
+@* Biblioteca de animaciones de la mascota y su asignación por categoría (ver MascotStudio).
+   Cada cambio se guarda al instante en el avatar.json del usuario; la mascota lo nota sola. *@
+
+<Card Title="Animaciones">
+    <Action>
+        <button type="button" class="btn btn-sm btn-primary" disabled="@_busy" @onclick="ImportAsync">Importar…</button>
+    </Action>
+    <ChildContent>
+        <p class="text-secondary-ui">
+            Archivos <span class="mono">.vrma</span> (VRoid, BOOTH) o <span class="mono">.fbx</span> de Mixamo
+            (descargados <em>Without Skin</em>). Sirven para cualquier modelo VRM.
+        </p>
+        @if (_library.Count == 0)
+        {
+            <p class="empty-ui">No hay animaciones todavía.</p>
+        }
+        else
+        {
+            <ul class="row-list">
+                @foreach (var file in _library)
+                {
+                    <li>
+                        <span class="row-list__main">@file.Name</span>
+                        <span class="pill">@file.Extension.TrimStart('.').ToUpperInvariant()</span>
+                        <span class="row-list__meta">@(file.IsImported ? "importada" : "de fábrica")</span>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => Play(file.Name)"
+                                aria-label="Probar @file.Name en la mascota">Probar</button>
+                        @if (file.IsImported)
+                        {
+                            <button type="button" class="btn btn-sm btn-outline-danger" @onclick="() => DeleteAsync(file)"
+                                    aria-label="Eliminar @file.Name">Eliminar</button>
+                        }
+                    </li>
+                }
+            </ul>
+        }
+    </ChildContent>
+</Card>
+
+<Card Title="Categorías" Class="mt-4">
+    <p class="text-secondary-ui">
+        Cuando pasa algo, la mascota elige al azar una de las animaciones asignadas a esa categoría.
+        Avatar: <strong>@_profile.Name</strong>.
+    </p>
+
+    @foreach (var category in _categories)
+    {
+        var assigned = _profile.Animations.GetValueOrDefault(category.Id) ?? [];
+        var available = _library.Where(f => !assigned.Contains(f.Name)).ToList();
+        <div class="category-row">
+            <div class="category-row__head">
+                <span class="category-row__label">@category.Label</span>
+                <span class="pill @(category.Trigger == "pending" ? "pill--warning" : null)">@TriggerLabel(category)</span>
+                @if (category.IsCustom)
+                {
+                    <button type="button" class="btn btn-sm btn-link text-danger" @onclick="() => RemoveCategory(category)"
+                            aria-label="Eliminar la categoría @category.Label">Eliminar categoría</button>
+                }
+            </div>
+            <div class="chip-list">
+                @foreach (var name in assigned)
+                {
+                    <span class="chip">
+                        @name
+                        <button type="button" class="chip__remove" @onclick="() => Unassign(category.Id, name)"
+                                aria-label="Quitar @name de @category.Label">✕</button>
+                    </span>
+                }
+                @if (available.Count > 0)
+                {
+                    <select class="form-select form-select-sm chip-add" aria-label="Agregar animación a @category.Label"
+                            @onchange="e => Assign(category.Id, e.Value?.ToString())">
+                        <option value="">+ Agregar…</option>
+                        @foreach (var file in available)
+                        {
+                            <option value="@file.Name">@file.Name</option>
+                        }
+                    </select>
+                }
+                else if (assigned.Count == 0)
+                {
+                    <span class="text-secondary-ui">Sin animaciones (importa alguna arriba).</span>
+                }
+            </div>
+        </div>
+    }
+
+    <div class="d-flex mt-3" style="gap: 10px;">
+        <input class="form-control" placeholder="Nueva categoría (ej.: Buenos días)" @bind="_newCategory"
+               @bind:event="oninput" aria-label="Nombre de la nueva categoría" />
+        <button type="button" class="btn btn-outline-secondary" disabled="@string.IsNullOrWhiteSpace(_newCategory)"
+                @onclick="AddCategory">Agregar</button>
+    </div>
+
+    @if (!string.IsNullOrEmpty(_message))
+    {
+        <p class="mt-3 mb-0 @(_isError ? "text-danger" : "text-secondary-ui")">@_message</p>
+    }
+</Card>
+
+@code {
+    private MascotStudio.Profile _profile = new();
+    private List<MascotStudio.Category> _categories = [];
+    private List<MascotStudio.AnimationFile> _library = [];
+    private string _newCategory = string.Empty;
+    private string? _message;
+    private bool _isError;
+    private bool _busy;
+
+    protected override void OnInitialized() => Reload();
+
+    private void Reload()
+    {
+        try
+        {
+            _profile = MascotStudio.LoadProfile();
+            _categories = MascotStudio.LoadCategories(_profile);
+            _library = MascotStudio.ListAnimations();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+        {
+            Show($"No se pudo leer la configuración de la mascota: {ex.Message}", error: true);
+        }
+    }
+
+    private static string TriggerLabel(MascotStudio.Category category) => category.Trigger switch
+    {
+        "auto" => "automática",
+        "pending" => "próximamente",
+        _ => "solo a mano",
+    };
+
+    private void Show(string message, bool error = false)
+    {
+        _message = message;
+        _isError = error;
+    }
+
+    private void Save(string okMessage)
+    {
+        try
+        {
+            MascotStudio.SaveProfile(_profile);
+            Show(okMessage);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Show($"No se pudo guardar: {ex.Message}", error: true);
+        }
+    }
+
+    private void Assign(string categoryId, string? name)
+    {
+        if (string.IsNullOrEmpty(name))
+            return;
+        if (!_profile.Animations.TryGetValue(categoryId, out var list))
+            _profile.Animations[categoryId] = list = [];
+        if (!list.Contains(name))
+            list.Add(name);
+        Save($"«{name}» asignada. La mascota se actualiza sola.");
+    }
+
+    private void Unassign(string categoryId, string name)
+    {
+        _profile.Animations.GetValueOrDefault(categoryId)?.Remove(name);
+        Save($"«{name}» quitada.");
+    }
+
+    private void AddCategory()
+    {
+        var label = _newCategory.Trim();
+        var id = MascotStudio.CategoryId(label);
+        if (_categories.Any(c => c.Id == id))
+        {
+            Show("Ya existe una categoría con ese nombre.", error: true);
+            return;
+        }
+        _profile.CustomCategories[id] = label;
+        _profile.Animations[id] = [];
+        _newCategory = string.Empty;
+        Save($"Categoría «{label}» creada. Por ahora no se dispara sola: más adelante Artemis podrá usarla.");
+        _categories = MascotStudio.LoadCategories(_profile);
+    }
+
+    private void RemoveCategory(MascotStudio.Category category)
+    {
+        _profile.CustomCategories.Remove(category.Id);
+        _profile.Animations.Remove(category.Id);
+        Save($"Categoría «{category.Label}» eliminada.");
+        _categories = MascotStudio.LoadCategories(_profile);
+    }
+
+    private void Play(string name)
+    {
+        if (!MascotLauncher.IsRunning())
+        {
+            Show("La mascota está cerrada: ábrela arriba para probar la animación.", error: true);
+            return;
+        }
+        try
+        {
+            MascotStudio.PlayOnMascot(name);
+            Show($"Reproduciendo «{name}» en la mascota…");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Show($"No se pudo avisar a la mascota: {ex.Message}", error: true);
+        }
+    }
+
+    private async Task ImportAsync()
+    {
+        _busy = true;
+        try
+        {
+            var types = new FilePickerFileType(new Dictionary<DevicePlatform, IEnumerable<string>>
+            {
+                { DevicePlatform.WinUI, new[] { ".vrma", ".fbx" } },
+            });
+            var picked = await FilePicker.Default.PickMultipleAsync(new PickOptions { FileTypes = types, PickerTitle = "Animaciones para la mascota" });
+            var names = new List<string>();
+            foreach (var file in picked ?? [])
+            {
+                if (file?.FullPath is { } path)
+                    names.Add(MascotStudio.ImportAnimation(path));
+            }
+            if (names.Count > 0)
+            {
+                _library = MascotStudio.ListAnimations();
+                Show($"Importada{(names.Count > 1 ? "s" : "")}: {string.Join(", ", names)}. Asígnalas a una categoría abajo.");
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            Show($"No se pudo importar: {ex.Message}", error: true);
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private Task DeleteAsync(MascotStudio.AnimationFile file)
+    {
+        try
+        {
+            MascotStudio.DeleteImported(file);
+            foreach (var list in _profile.Animations.Values)
+                list.Remove(file.Name);
+            MascotStudio.SaveProfile(_profile);
+            _library = MascotStudio.ListAnimations();
+            Show($"«{file.Name}» eliminada (y quitada de sus categorías).");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            Show($"No se pudo eliminar: {ex.Message}", error: true);
+        }
+        return Task.CompletedTask;
+    }
+}

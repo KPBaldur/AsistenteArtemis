@@ -1,0 +1,14 @@
+[
+	{ "id": "greet", "label": "Al abrir la mascota", "trigger": "auto" },
+	{ "id": "click", "label": "Clic sobre la mascota", "trigger": "auto" },
+	{ "id": "idle", "label": "Reposo (de vez en cuando)", "trigger": "auto" },
+	{ "id": "celebrate", "label": "Celebrar (respaldo de lo guardado)", "trigger": "auto" },
+	{ "id": "task_created", "label": "Tarea creada", "trigger": "auto" },
+	{ "id": "reminder_created", "label": "Recordatorio creado", "trigger": "auto" },
+	{ "id": "alarm_created", "label": "Alarma creada", "trigger": "auto" },
+	{ "id": "note_saved", "label": "Nota guardada", "trigger": "auto" },
+	{ "id": "comment_saved", "label": "Comentario de proyecto", "trigger": "auto" },
+	{ "id": "task_done", "label": "Tarea completada", "trigger": "pending" },
+	{ "id": "alarm_ringing", "label": "Alarma sonando", "trigger": "pending" },
+	{ "id": "server_down", "label": "Servidor caído", "trigger": "pending" }
+]

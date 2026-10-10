@@ -9,10 +9,19 @@ extends Node3D
 ## Solo la silueta del personaje recibe el mouse; el resto de la ventana deja
 ## pasar los clics al escritorio.
 
+# De fábrica en el repo (res://) y lo que el usuario configura desde la app en sus datos
+# (user://): un avatar.json en user://avatars/<id>/ reemplaza al de res://avatars/<id>/, y
+# las animaciones importadas viven en user://animations. Ver AsistenteArtemis.Client.Maui
+# (MascotStudio.cs y la pantalla Identidad).
 const AVATARS_DIR := "res://avatars"
+const USER_AVATARS_DIR := "user://avatars"
 const DEFAULT_AVATAR := "muestra"
 const ANIMATIONS_DIR := "res://animations"
+const USER_ANIMATIONS_DIR := "user://animations"
 const CONFIG_PATH := "user://mascot.cfg"
+# La app deja aquí pedidos para la mascota ({"id": n, "play": "<animación>"}).
+const COMMAND_PATH := "user://command.json"
+const WATCH_INTERVAL := 1.0
 const WINDOW_SIZE := Vector2i(260, 400)
 const SCREEN_MARGIN := 12
 
@@ -36,23 +45,11 @@ const CLIP_FADE_IN := 0.3
 const CLIP_FADE_OUT := 0.4
 const HIPS_HORIZONTAL_FACTOR := 0.3
 
-# Categorías de animación: cada avatar.json asigna a cada una una lista de clips (por nombre
-# de archivo, sin extensión) y se elige uno al azar. Las marcadas "pendiente" necesitan que la
-# Api avise del evento a la mascota (PresenceHub, R5) y todavía no se disparan.
-const ANIMATION_CATEGORIES := {
-	"greet": "Al abrir la mascota",
-	"click": "Clic sobre la mascota",
-	"celebrate": "Celebrar (respaldo de los guardados)",
-	"task_created": "Tarea creada",
-	"reminder_created": "Recordatorio creado",
-	"alarm_created": "Alarma creada",
-	"note_saved": "Nota guardada",
-	"comment_saved": "Comentario de proyecto",
-	"task_done": "Tarea completada (pendiente)",
-	"alarm_ringing": "Alarma sonando (pendiente)",
-	"server_down": "Servidor caído (pendiente)",
-	"idle": "Reposo, de vez en cuando",
-}
+# Categorías de animación: el catálogo (id, nombre y si se dispara sola) está en
+# res://avatars/categories.json, compartido con la app. Cada avatar.json asigna a cada
+# categoría una lista de animaciones (por nombre de archivo, sin extensión) y se elige una al
+# azar. Las "pending" esperan que la Api avise del evento (PresenceHub, R5); las que agrega el
+# usuario no se disparan solas (por ahora, solo se prueban a mano).
 # Si una categoría no tiene clips, se prueba con esta.
 const CATEGORY_FALLBACK := {
 	"task_created": "celebrate", "reminder_created": "celebrate", "alarm_created": "celebrate",
@@ -123,6 +120,7 @@ func _ready() -> void:
 	if not _has_test_args():
 		get_tree().create_timer(1.0).timeout.connect(play_role.bind("greet"))
 		_schedule_idle()
+		_start_watching()
 	_handle_screenshot_arg()
 
 
@@ -205,14 +203,16 @@ func _update_mouse_passthrough() -> void:
 
 # --- Avatar ------------------------------------------------------------------
 
-# Perfil del avatar activo: [avatar] id en mascot.cfg (o "muestra"). "model" puede ser res://,
-# una ruta absoluta o relativa a la carpeta del avatar.
+# Perfil del avatar activo: [avatar] id en mascot.cfg (o "muestra"). Gana el avatar.json de
+# user:// (lo que se configuró en la app) sobre el de fábrica. "model" puede ser res://, una
+# ruta absoluta o relativa a la carpeta del avatar (la de fábrica).
 func _load_avatar_profile() -> Dictionary:
 	var cfg := ConfigFile.new()
 	cfg.load(CONFIG_PATH)
 	var avatar_id: String = cfg.get_value("avatar", "id", DEFAULT_AVATAR)
 	var folder := AVATARS_DIR.path_join(avatar_id)
-	var profile = JSON.parse_string(FileAccess.get_file_as_string(folder.path_join("avatar.json")))
+	var profile_path := _profile_path(avatar_id)
+	var profile = JSON.parse_string(FileAccess.get_file_as_string(profile_path)) if FileAccess.file_exists(profile_path) else null
 	if not profile is Dictionary:
 		if avatar_id != DEFAULT_AVATAR:
 			push_warning("Avatar «%s» sin avatar.json válido; uso «%s»" % [avatar_id, DEFAULT_AVATAR])
@@ -228,6 +228,11 @@ func _load_avatar_profile() -> Dictionary:
 	if not profile.get("animations") is Dictionary:
 		profile.animations = {}
 	return profile
+
+
+func _profile_path(avatar_id: String) -> String:
+	var user_path := USER_AVATARS_DIR.path_join(avatar_id).path_join("avatar.json")
+	return user_path if FileAccess.file_exists(user_path) else AVATARS_DIR.path_join(avatar_id).path_join("avatar.json")
 
 
 func _load_avatar(model_path: String) -> void:
@@ -385,7 +390,8 @@ func _set_expression(preset: String, value: float) -> void:
 # Biblioteca compartida (sirve para cualquier avatar VRM) + animaciones propias del avatar,
 # si su carpeta trae una subcarpeta animations/.
 func _load_clips() -> void:
-	for dir_path in [ANIMATIONS_DIR, AVATARS_DIR.path_join(_avatar.id).path_join("animations")]:
+	_clips.clear()
+	for dir_path in [ANIMATIONS_DIR, USER_ANIMATIONS_DIR, AVATARS_DIR.path_join(_avatar.id).path_join("animations")]:
 		var dir := DirAccess.open(dir_path)
 		if dir == null:
 			continue
@@ -417,6 +423,56 @@ func play_role(category: String) -> void:
 			play_role(CATEGORY_FALLBACK[category])
 		return
 	play_clip(candidates.pick_random())
+
+
+# La app configura la mascota escribiendo archivos en user:// (avatar.json, animaciones
+# importadas, command.json). Se revisan cada segundo: es barato (solo fechas y nombres) y
+# evita montar un canal de comunicación para algo que cambia pocas veces.
+var _watch_signature := ""
+var _last_command_id := -1
+
+func _start_watching() -> void:
+	_watch_signature = _config_signature()
+	_last_command_id = int(_read_command().get("id", -1))
+	var timer := Timer.new()
+	timer.wait_time = WATCH_INTERVAL
+	timer.timeout.connect(_on_watch)
+	add_child(timer)
+	timer.start()
+
+
+func _config_signature() -> String:
+	var parts := [str(FileAccess.get_modified_time(_profile_path(_avatar.get("id", DEFAULT_AVATAR))))]
+	var dir := DirAccess.open(USER_ANIMATIONS_DIR)
+	if dir:
+		for file in dir.get_files():
+			parts.append(file)
+	return "|".join(parts)
+
+
+func _read_command() -> Dictionary:
+	if not FileAccess.file_exists(COMMAND_PATH):
+		return {}
+	var parsed = JSON.parse_string(FileAccess.get_file_as_string(COMMAND_PATH))
+	return parsed if parsed is Dictionary else {}
+
+
+func _on_watch() -> void:
+	var signature := _config_signature()
+	if signature != _watch_signature:
+		_watch_signature = signature
+		# El modelo no se recarga en caliente (cambiar de avatar requiere reiniciar la mascota);
+		# las categorías y la biblioteca de animaciones sí.
+		var profile := _load_avatar_profile()
+		_avatar.animations = profile.animations
+		_load_clips()
+		_fill_animations_menu()
+	var command := _read_command()
+	var command_id := int(command.get("id", -1))
+	if command_id != _last_command_id:
+		_last_command_id = command_id
+		if command.has("play"):
+			play_clip(str(command.play))
 
 
 # Cada tanto, si no está haciendo nada, una animación de reposo.
