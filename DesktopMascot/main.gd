@@ -1,34 +1,26 @@
 extends Node3D
 
 ## Mascota de escritorio de Artemis: ventana transparente, sin bordes y siempre
-## encima, con un avatar VRM animado por código (el modelo no trae animaciones).
+## encima, con un avatar VRM. Dos capas de animación que se mezclan:
+## - procedural: brazos abajo, respiración, balanceo, parpadeo y mirada al cursor;
+## - clips VRMA (res://animations/*.vrma, ver vrma_clip.gd) que se disparan con eventos:
+##   saludar al abrir, reaccionar al clic, celebrar al guardar algo.
 ## Solo la silueta del personaje recibe el mouse; el resto de la ventana deja
 ## pasar los clics al escritorio.
 
 const AVATAR_PATH := "res://models/sample.vrm"
+const ANIMATIONS_DIR := "res://animations"
 const CONFIG_PATH := "user://mascot.cfg"
 const WINDOW_SIZE := Vector2i(260, 400)
 const SCREEN_MARGIN := 12
 
-# Huesos y expresiones del esqueleto de VRoid (el VRM se carga como glTF puro,
-# sin la extensión VRM, así que se usan los nombres originales del archivo).
-const BONE_HIPS := "J_Bip_C_Hips"
-const BONE_SPINE := "J_Bip_C_Spine"
-const BONE_CHEST := "J_Bip_C_Chest"
-const BONE_NECK := "J_Bip_C_Neck"
-const BONE_HEAD := "J_Bip_C_Head"
-const BONE_SHOULDER_L := "J_Bip_L_Shoulder"
-const BONE_SHOULDER_R := "J_Bip_R_Shoulder"
-const BONE_UPPER_ARM_L := "J_Bip_L_UpperArm"
-const BONE_UPPER_ARM_R := "J_Bip_R_UpperArm"
-# Huesos auxiliares de VRoid (manga de la polera y corrección del brazo) que
-# cuelgan del hombro y en Unity siguen al brazo por constraints; sin la
-# extensión VRM no hay constraints, así que se les copia la rotación del brazo.
-const ARM_FOLLOWERS_L := ["J_Aim_L_TopsUpperArm", "J_Aim_L_Shoulder"]
-const ARM_FOLLOWERS_R := ["J_Aim_R_TopsUpperArm", "J_Aim_R_Shoulder"]
-const BONE_LOWER_ARM_L := "J_Bip_L_LowerArm"
-const BONE_LOWER_ARM_R := "J_Bip_R_LowerArm"
-const BLINK_SHAPE := "Fcl_EYE_Close"
+# Huesos auxiliares de este modelo de VRoid (manga de la polera y corrección del brazo) que
+# cuelgan del hombro y siguen al brazo por VRMC_node_constraint, que aquí no se evalúa: se
+# les copia la rotación del brazo. En otro modelo simplemente no existen y se ignoran.
+const ARM_FOLLOWERS := {
+	"leftUpperArm": ["J_Aim_L_TopsUpperArm", "J_Aim_L_Shoulder"],
+	"rightUpperArm": ["J_Aim_R_TopsUpperArm", "J_Aim_R_Shoulder"],
+}
 
 const SHOULDER_DOWN_DEGREES := 12.0
 const ARM_DOWN_DEGREES := 62.0
@@ -38,6 +30,17 @@ const LOOK_MAX_PITCH := deg_to_rad(20.0)
 const LOOK_SMOOTHING := 6.0
 const BREATH_PERIOD := 4.2
 const BLINK_DURATION := 0.16
+
+const CLIP_FADE_IN := 0.3
+const CLIP_FADE_OUT := 0.4
+# Qué clips se usan para cada evento, por nombre de archivo (sin .vrma), en orden de
+# preferencia; "click" elige uno al azar entre los que existan. Si ninguno existe, se usa
+# cualquier clip disponible.
+const CLIP_ROLES := {
+	"greet": ["greeting", "wave"],
+	"celebrate": ["peace", "celebrate", "spin", "model_pose", "wave"],
+	"click": ["peace", "greeting", "model_pose", "show_body", "spin", "wave"],
+}
 
 enum MenuItem { NEW_ALARM, NEW_NOTE, NEW_TASK, NEW_REMINDER, PROJECT_COMMENT, SERVERS, RESET_POSITION, QUIT }
 
@@ -49,6 +52,7 @@ const AlarmForm := preload("res://forms/alarm_form.gd")
 const NoteForm := preload("res://forms/note_form.gd")
 const TaskForm := preload("res://forms/task_form.gd")
 const CommentForm := preload("res://forms/comment_form.gd")
+const VrmaClip := preload("res://vrma_clip.gd")
 
 @onready var _camera: Camera3D = $Camera3D
 @onready var _menu: PopupMenu = $ContextMenu
@@ -57,10 +61,17 @@ var _api: ApiClient
 var _bubble: Bubble
 
 var _skeleton: Skeleton3D
-var _bones := {}
-var _face: MeshInstance3D
-var _blink_index := -1
+var _human := {}        # hueso humanoide VRM ("hips", "leftUpperArm"…) -> índice en el esqueleto
+var _followers := {}    # hueso humanoide -> índices de huesos que copian su rotación
+var _expressions := {}  # preset VRM ("blink", "happy"…) -> [[MeshInstance3D, blend shape, peso], …]
+var _hips_height := 1.0
+var _posed := {}        # huesos tocados en el último frame (para devolverlos al reposo)
 var _avatar_meshes: Array[MeshInstance3D] = []
+
+var _clips := {}        # nombre de archivo -> VrmaClip
+var _clip: VrmaClip
+var _clip_t := 0.0
+var _clip_expressions := {}
 
 var _time := 0.0
 var _look := Vector2.ZERO  # x = yaw, y = pitch (radianes), suavizado
@@ -71,18 +82,22 @@ var _fixed_look: Variant = null  # Vector2 en [-1, 1] para pruebas (--look=x,y)
 
 var _dragging := false
 var _drag_offset := Vector2i.ZERO
+var _press_at := Vector2i.ZERO
 
 
 func _ready() -> void:
 	_write_pid_file()
 	_setup_window()
 	_load_avatar()
+	_load_clips()
 	_api = ApiClient.new()
 	add_child(_api)
 	_bubble = Bubble.new()
 	_bubble.visible = false
 	add_child(_bubble)
 	_setup_menu()
+	if not _has_test_args():
+		get_tree().create_timer(1.0).timeout.connect(play_role.bind("greet"))
 	_handle_screenshot_arg()
 
 
@@ -179,54 +194,193 @@ func _load_avatar() -> void:
 	var skeletons := avatar.find_children("*", "Skeleton3D", true, false)
 	if not skeletons.is_empty():
 		_skeleton = skeletons[0]
-		for bone_name in [BONE_HIPS, BONE_SPINE, BONE_CHEST, BONE_NECK, BONE_HEAD,
-				BONE_SHOULDER_L, BONE_SHOULDER_R, BONE_UPPER_ARM_L, BONE_UPPER_ARM_R,
-				BONE_LOWER_ARM_L, BONE_LOWER_ARM_R] + ARM_FOLLOWERS_L + ARM_FOLLOWERS_R:
-			_bones[bone_name] = _skeleton.find_bone(bone_name)
-
+		_map_humanoid(gltf_state)
 	for node in avatar.find_children("*", "MeshInstance3D", true, false):
-		var mesh := node as MeshInstance3D
-		_avatar_meshes.append(mesh)
-		if mesh.mesh is ArrayMesh:
-			var array_mesh := mesh.mesh as ArrayMesh
-			for i in array_mesh.get_blend_shape_count():
-				if array_mesh.get_blend_shape_name(i).ends_with(BLINK_SHAPE):
-					_face = mesh
-					_blink_index = i
-
+		_avatar_meshes.append(node as MeshInstance3D)
+	_map_expressions(gltf_state)
 	_update_mouse_passthrough()
+
+
+# Huesos humanoides desde la extensión VRM del modelo (VRMC_vrm en 1.0; VRM en 0.x).
+func _map_humanoid(state: GLTFState) -> void:
+	var ext: Dictionary = state.json.get("extensions", {})
+	var bones := {}
+	if ext.has("VRMC_vrm"):
+		var human: Dictionary = ext.VRMC_vrm.get("humanoid", {}).get("humanBones", {})
+		for bone_name in human:
+			bones[bone_name] = int(human[bone_name].get("node", -1))
+	elif ext.has("VRM"):
+		for entry in ext.VRM.get("humanoid", {}).get("humanBones", []):
+			bones[entry.get("bone")] = int(entry.get("node", -1))
+
+	var nodes := state.get_nodes()
+	for bone_name in bones:
+		var node_idx: int = bones[bone_name]
+		if node_idx < 0 or node_idx >= nodes.size():
+			continue
+		var idx := _skeleton.find_bone((nodes[node_idx] as GLTFNode).resource_name)
+		if idx < 0 and state.get_scene_node(node_idx):
+			idx = _skeleton.find_bone(state.get_scene_node(node_idx).name)
+		if idx >= 0:
+			_human[bone_name] = idx
+
+	for bone_name in ARM_FOLLOWERS:
+		var found := []
+		for follower in ARM_FOLLOWERS[bone_name]:
+			var idx := _skeleton.find_bone(follower)
+			if idx >= 0:
+				found.append(idx)
+		_followers[bone_name] = found
+
+	if _human.has("hips"):
+		_hips_height = maxf(_skeleton.get_bone_global_rest(_human.hips).origin.y, 0.01)
+
+
+# Expresiones VRM 1.0: cada preset mueve uno o más blend shapes con un peso. Las mallas se
+# buscan por nombre: get_scene_node() devuelve las ImporterMeshInstance3D originales, que
+# generate_scene() ya reemplazó (y liberó) por MeshInstance3D.
+func _map_expressions(state: GLTFState) -> void:
+	var vrm: Dictionary = state.json.get("extensions", {}).get("VRMC_vrm", {})
+	var presets: Dictionary = vrm.get("expressions", {}).get("preset", {})
+	var mesh_by_name := {}
+	for mesh in _avatar_meshes:
+		mesh_by_name[str(mesh.name)] = mesh
+	var nodes := state.get_nodes()
+	for preset in presets:
+		var binds := []
+		for bind in presets[preset].get("morphTargetBinds", []):
+			var node_idx := int(bind.get("node", -1))
+			if node_idx < 0 or node_idx >= nodes.size():
+				continue
+			var mesh: MeshInstance3D = mesh_by_name.get((nodes[node_idx] as GLTFNode).resource_name)
+			if mesh:
+				binds.append([mesh, int(bind.get("index", 0)), float(bind.get("weight", 1.0))])
+		if not binds.is_empty():
+			_expressions[preset] = binds
+
+
+func _set_expression(preset: String, value: float) -> void:
+	for bind in _expressions.get(preset, []):
+		var mesh: MeshInstance3D = bind[0]
+		if bind[1] < mesh.get_blend_shape_count():
+			mesh.set_blend_shape_value(bind[1], value * bind[2])
+
+
+# --- Clips VRMA -----------------------------------------------------------------
+
+func _load_clips() -> void:
+	var dir := DirAccess.open(ANIMATIONS_DIR)
+	if dir == null:
+		return
+	for file in dir.get_files():
+		if file.get_extension().to_lower() != "vrma":
+			continue
+		var clip = VrmaClip.load_file(ANIMATIONS_DIR.path_join(file))
+		if clip:
+			_clips[clip.name] = clip
+
+
+func play_clip(clip_name: String) -> void:
+	if not _clips.has(clip_name):
+		return
+	_clip = _clips[clip_name]
+	_clip_t = 0.0
+
+
+## Dispara la animación de un evento ("greet", "celebrate", "click"); ver CLIP_ROLES.
+func play_role(role: String) -> void:
+	var candidates: Array = CLIP_ROLES.get(role, []).filter(func(n): return _clips.has(n))
+	if candidates.is_empty():
+		candidates = _clips.keys()
+	if candidates.is_empty():
+		return
+	play_clip(candidates.pick_random() if role == "click" else candidates[0])
+
+
+# Peso del clip activo: entra y sale con fundido para no saltar desde la pose procedural.
+func _clip_weight() -> float:
+	if _clip == null:
+		return 0.0
+	var fade_in := clampf(_clip_t / CLIP_FADE_IN, 0.0, 1.0)
+	var fade_out := clampf((_clip.duration - _clip_t) / CLIP_FADE_OUT, 0.0, 1.0)
+	return smoothstep(0.0, 1.0, minf(fade_in, fade_out))
 
 
 func _process(delta: float) -> void:
 	_time += delta
+	if _clip:
+		_clip_t += delta
+		if _clip_t >= _clip.duration:
+			_clip = null
 	if _skeleton:
 		_animate_body(delta)
-	_animate_blink(delta)
+	_animate_face(delta)
 
 
 func _animate_body(delta: float) -> void:
+	var pose := _procedural_pose()
+	var weight := _clip_weight()
+	var hips_offset := Vector3.ZERO
+	if weight > 0.0:
+		var clip_pose: Dictionary = _clip.sample_bones(_clip_t)
+		for bone_name in clip_pose:
+			var base: Quaternion = pose.get(bone_name, Quaternion.IDENTITY)
+			pose[bone_name] = base.slerp(clip_pose[bone_name], weight)
+		hips_offset = _clip.sample_hips_offset(_clip_t) * (_hips_height / _clip.hips_rest_height) * weight
+		_clip_expressions = _clip.sample_expressions(_clip_t)
+	else:
+		_clip_expressions = {}
+
+	# Mirar al cursor encima de todo; mientras suena un clip, la mirada cede casi todo el
+	# control para que se note el gesto de la animación.
+	var look_rot := _look_rotation(delta)
+	var look_amount := 1.0 - 0.75 * weight
+	pose.neck = Quaternion.IDENTITY.slerp(look_rot, 0.4 * look_amount) * pose.get("neck", Quaternion.IDENTITY)
+	pose.head = Quaternion.IDENTITY.slerp(look_rot, 0.6 * look_amount) * pose.get("head", Quaternion.IDENTITY)
+
+	var posed_now := {}
+	for bone_name in pose:
+		if _human.has(bone_name):
+			_pose_bone(_human[bone_name], pose[bone_name])
+			posed_now[bone_name] = true
+			for follower in _followers.get(bone_name, []):
+				_pose_bone(follower, pose[bone_name])
+	# Lo que movió el clip y ya no se mueve (piernas, dedos…) vuelve al reposo.
+	for bone_name in _posed:
+		if not posed_now.has(bone_name) and _human.has(bone_name):
+			_pose_bone(_human[bone_name], Quaternion.IDENTITY)
+	_posed = posed_now
+
+	if _human.has("hips"):
+		var idx: int = _human.hips
+		var parent := _skeleton.get_bone_parent(idx)
+		var parent_basis := _skeleton.get_bone_global_rest(parent).basis if parent >= 0 else Basis.IDENTITY
+		_skeleton.set_bone_pose_position(idx, _skeleton.get_bone_rest(idx).origin + parent_basis.inverse() * hips_offset)
+
+
+# Pose procedural en el espacio normalizado (rotaciones en ejes del mundo respecto del
+# reposo en T): brazos abajo, respiración y balanceo.
+func _procedural_pose() -> Dictionary:
 	var breath := sin(_time * TAU / BREATH_PERIOD)
 	var sway := sin(_time * TAU / (BREATH_PERIOD * 2.3))
-
-	_pose(BONE_HIPS, Quaternion(Vector3.BACK, deg_to_rad(0.8) * sway))
-	_pose(BONE_SPINE, Quaternion(Vector3.RIGHT, deg_to_rad(-0.8) * breath))
-	_pose(BONE_CHEST, Quaternion(Vector3.RIGHT, deg_to_rad(-1.2) * breath))
-
-	# Brazos abajo desde la pose T, con los codos un poco doblados y un
-	# movimiento mínimo al respirar. (Vector3.BACK es +Z: el avatar mira hacia
-	# la cámara, y su brazo izquierdo apunta a +X.)
+	# Vector3.BACK es +Z: el avatar mira hacia la cámara y su brazo izquierdo apunta a +X.
 	var shoulder := deg_to_rad(SHOULDER_DOWN_DEGREES)
-	_pose(BONE_SHOULDER_L, Quaternion(Vector3.BACK, -shoulder))
-	_pose(BONE_SHOULDER_R, Quaternion(Vector3.BACK, shoulder))
 	var arm := deg_to_rad(ARM_DOWN_DEGREES + 1.5 * breath)
-	for bone_name in [BONE_UPPER_ARM_L] + ARM_FOLLOWERS_L:
-		_pose(bone_name, Quaternion(Vector3.BACK, -arm))
-	for bone_name in [BONE_UPPER_ARM_R] + ARM_FOLLOWERS_R:
-		_pose(bone_name, Quaternion(Vector3.BACK, arm))
-	_pose(BONE_LOWER_ARM_L, Quaternion(Vector3.UP, deg_to_rad(ELBOW_BEND_DEGREES)))
-	_pose(BONE_LOWER_ARM_R, Quaternion(Vector3.UP, deg_to_rad(-ELBOW_BEND_DEGREES)))
+	return {
+		hips = Quaternion(Vector3.BACK, deg_to_rad(0.8) * sway),
+		spine = Quaternion(Vector3.RIGHT, deg_to_rad(-0.8) * breath),
+		chest = Quaternion(Vector3.RIGHT, deg_to_rad(-1.2) * breath),
+		leftShoulder = Quaternion(Vector3.BACK, -shoulder),
+		rightShoulder = Quaternion(Vector3.BACK, shoulder),
+		leftUpperArm = Quaternion(Vector3.BACK, -arm),
+		rightUpperArm = Quaternion(Vector3.BACK, arm),
+		leftLowerArm = Quaternion(Vector3.UP, deg_to_rad(ELBOW_BEND_DEGREES)),
+		rightLowerArm = Quaternion(Vector3.UP, deg_to_rad(-ELBOW_BEND_DEGREES)),
+	}
 
-	# Mirar al cursor: posición del mouse en pantalla relativa a la cabeza.
+
+# Mirar al cursor: posición del mouse en pantalla relativa a la cabeza.
+func _look_rotation(delta: float) -> Quaternion:
 	var head_screen := Vector2(get_window().position) + Vector2(WINDOW_SIZE) * Vector2(0.5, 0.25)
 	var to_mouse := Vector2(DisplayServer.mouse_get_position()) - head_screen
 	var target := Vector2(
@@ -236,39 +390,40 @@ func _animate_body(delta: float) -> void:
 		target = _fixed_look
 	target *= Vector2(LOOK_MAX_YAW, LOOK_MAX_PITCH)
 	_look = _look.lerp(target, clampf(LOOK_SMOOTHING * delta, 0.0, 1.0))
-	var look_rot := Quaternion(Vector3.UP, _look.x) * Quaternion(Vector3.RIGHT, -_look.y)
-	_pose(BONE_NECK, Quaternion.IDENTITY.slerp(look_rot, 0.4))
-	_pose(BONE_HEAD, Quaternion.IDENTITY.slerp(look_rot, 0.6))
+	return Quaternion(Vector3.UP, _look.x) * Quaternion(Vector3.RIGHT, -_look.y)
 
 
-# Aplica una rotación expresada en ejes del esqueleto (X derecha de la
-# pantalla, Y arriba, Z hacia la cámara) sobre la pose de reposo del hueso.
-# Hay que llevarla a los ejes locales del hueso: en este modelo algunos huesos
-# (la cabeza) tienen el reposo rotado y girar sobre su "Y" local la inclinaba.
-func _pose(bone_name: String, rotation_delta: Quaternion) -> void:
-	var idx: int = _bones.get(bone_name, -1)
-	if idx < 0:
-		return
+# Aplica una rotación normalizada (en ejes del esqueleto: X derecha de la pantalla, Y arriba,
+# Z hacia la cámara, respecto del reposo) llevándola a los ejes locales del hueso: algunos
+# huesos (la cabeza) tienen el reposo rotado y girar sobre su "Y" local la inclinaba.
+# Encadenado por la jerarquía, esto reproduce exactamente el esqueleto normalizado de VRM.
+func _pose_bone(idx: int, rotation_delta: Quaternion) -> void:
 	var rest := _skeleton.get_bone_rest(idx).basis.get_rotation_quaternion()
 	var global_rest := _skeleton.get_bone_global_rest(idx).basis.get_rotation_quaternion()
-	var local_delta := global_rest.inverse() * rotation_delta * global_rest
-	_skeleton.set_bone_pose_rotation(idx, rest * local_delta)
+	_skeleton.set_bone_pose_rotation(idx, rest * (global_rest.inverse() * rotation_delta * global_rest))
 
 
-func _animate_blink(delta: float) -> void:
-	if _blink_index < 0:
-		return
+# Parpadeo procedural + expresiones del clip activo (sonrisa, sorpresa…).
+func _animate_face(delta: float) -> void:
+	var blink := 0.0
 	if _blink_t < 0.0:
 		_next_blink -= delta
 		if _next_blink <= 0.0:
 			_blink_t = 0.0
-		return
-	_blink_t += delta
-	_face.set_blend_shape_value(_blink_index, sin(clampf(_blink_t / BLINK_DURATION, 0.0, 1.0) * PI))
-	if _blink_t >= BLINK_DURATION:
-		_face.set_blend_shape_value(_blink_index, 0.0)
-		_blink_t = -1.0
-		_next_blink = randf_range(2.5, 6.0)
+	else:
+		_blink_t += delta
+		blink = sin(clampf(_blink_t / BLINK_DURATION, 0.0, 1.0) * PI)
+		if _blink_t >= BLINK_DURATION:
+			blink = 0.0
+			_blink_t = -1.0
+			_next_blink = randf_range(2.5, 6.0)
+
+	var weight := _clip_weight()
+	for preset in _expressions:
+		var value: float = _clip_expressions.get(preset, 0.0) * weight
+		if preset == "blink":
+			value = maxf(value, blink)
+		_set_expression(preset, value)
 
 
 # --- Mouse: arrastrar y menú -------------------------------------------------
@@ -309,7 +464,9 @@ func _open(window_script: GDScript, extra: Dictionary = {}) -> void:
 	window.visible = false
 	add_child(window)
 	if window.has_signal("saved"):
-		window.saved.connect(func(message: String): say(message, "ok"))
+		window.saved.connect(func(message: String):
+			say(message, "ok")
+			play_role("celebrate"))
 	window.open(_api, _window_rect(), extra)
 
 
@@ -319,10 +476,15 @@ func _unhandled_input(event: InputEvent) -> void:
 		if button.button_index == MOUSE_BUTTON_LEFT:
 			if button.pressed:
 				_dragging = true
-				_drag_offset = DisplayServer.mouse_get_position() - get_window().position
+				_press_at = DisplayServer.mouse_get_position()
+				_drag_offset = _press_at - get_window().position
 			elif _dragging:
 				_dragging = false
-				_save_position()
+				# Un clic sin arrastre es una caricia: reacciona con un gesto.
+				if (DisplayServer.mouse_get_position() - _press_at).length() < 5:
+					play_role("click")
+				else:
+					_save_position()
 		elif button.button_index == MOUSE_BUTTON_RIGHT and button.pressed:
 			_menu.popup(Rect2i(DisplayServer.mouse_get_position(), Vector2i.ZERO))
 	elif event is InputEventMouseMotion and _dragging:
@@ -353,12 +515,23 @@ func _on_menu_id_pressed(id: int) -> void:
 # --- Pruebas: captura del encuadre y mirada fija -----------------------------
 # Uso: Godot --path DesktopMascot -- --screenshot=C:\ruta\captura.png --look=1,0
 # (--look fija la mirada en [-1, 1]: x a la derecha de la pantalla, y arriba.)
+# --clip=<nombre> --at=<segundos>: reproduce ese clip y captura en ese instante.
+
+func _has_test_args() -> bool:
+	return Array(OS.get_cmdline_user_args()).any(func(a): return a.begins_with("--"))
+
 
 func _handle_screenshot_arg() -> void:
+	var capture_delay := 1.5
 	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with("--look="):
 			var parts := arg.trim_prefix("--look=").split(",")
 			_fixed_look = Vector2(parts[0].to_float(), parts[1].to_float())
+		elif arg.begins_with("--clip="):
+			play_clip(arg.trim_prefix("--clip="))
+			print("Clips disponibles: ", _clips.keys())
+		elif arg.begins_with("--at="):
+			capture_delay = arg.trim_prefix("--at=").to_float()
 	# --open=alarm|reminder|task|note|servers abre esa ventanita (aunque no haya conexión con
 	# la Api) y la captura es de esa ventana en vez de la mascota.
 	var target: Viewport = get_viewport()
@@ -376,7 +549,7 @@ func _handle_screenshot_arg() -> void:
 				target = window
 	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with("--screenshot="):
-			await get_tree().create_timer(1.5).timeout
+			await get_tree().create_timer(capture_delay).timeout
 			await RenderingServer.frame_post_draw
 			var path := arg.trim_prefix("--screenshot=")
 			target.get_texture().get_image().save_png(path)
