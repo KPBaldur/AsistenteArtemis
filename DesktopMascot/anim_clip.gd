@@ -203,6 +203,15 @@ func _tracks_by_name() -> Dictionary:
 	return track_of
 
 
+## Huesos humanoides y expresiones que mueve el clip (para el informe de compatibilidad).
+func bone_names() -> Array:
+	return _bones.keys()
+
+
+func expression_names() -> Array:
+	return _expressions.keys()
+
+
 ## Rotaciones normalizadas por hueso humanoide en el instante t (segundos).
 func sample_bones(t: float) -> Dictionary:
 	var out := {}

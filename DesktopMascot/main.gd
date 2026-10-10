@@ -87,6 +87,9 @@ var _expressions := {}  # preset VRM ("blink", "happy"…) -> [[MeshInstance3D, 
 var _hips_height := 1.0
 var _posed := {}        # huesos tocados en el último frame (para devolverlos al reposo)
 var _avatar_meshes: Array[MeshInstance3D] = []
+var _avatar_root: Node3D
+var _model_path := ""
+var _vrm0 := false      # VRM 0.x: mira hacia -Z y sus expresiones se mapean distinto
 
 var _clips := {}        # nombre de archivo (sin extensión) -> AnimClip
 var _clip: AnimClip
@@ -235,17 +238,38 @@ func _profile_path(avatar_id: String) -> String:
 	return user_path if FileAccess.file_exists(user_path) else AVATARS_DIR.path_join(avatar_id).path_join("avatar.json")
 
 
-func _load_avatar(model_path: String) -> void:
+## Carga (o reemplaza) el modelo. Devuelve el GLTFState para el informe de compatibilidad, o
+## null si no se pudo leer (en ese caso queda el modelo anterior).
+func _load_avatar(model_path: String) -> GLTFState:
 	var gltf_doc := GLTFDocument.new()
 	var gltf_state := GLTFState.new()
 	var err := gltf_doc.append_from_file(model_path, gltf_state)
 	if err != OK:
-		push_error("Error cargando el VRM (append_from_file): %s" % err)
-		return
+		push_error("Error cargando el modelo %s: %s" % [model_path, error_string(err)])
+		return null
 	var avatar := gltf_doc.generate_scene(gltf_state)
 	if avatar == null:
-		push_error("generate_scene devolvió null")
-		return
+		push_error("generate_scene devolvió null para %s" % model_path)
+		return null
+
+	if _avatar_root:
+		_avatar_root.queue_free()
+	_avatar_root = avatar
+	_skeleton = null
+	_human = {}
+	_expressions = {}
+	_constraints = []
+	_posed = {}
+	_avatar_meshes = []
+	_clip = null
+	_model_path = model_path
+
+	var ext: Dictionary = gltf_state.json.get("extensions", {})
+	_vrm0 = not ext.has("VRMC_vrm") and ext.has("VRM")
+	# VRM 0.x mira hacia -Z: se gira para que mire a la cámara, y las rotaciones normalizadas
+	# (convención +Z de VRM 1.0) se convierten en _pose_bone.
+	if _vrm0:
+		avatar.rotate_y(PI)
 	add_child(avatar)
 
 	var skeletons := avatar.find_children("*", "Skeleton3D", true, false)
@@ -255,7 +279,32 @@ func _load_avatar(model_path: String) -> void:
 	for node in avatar.find_children("*", "MeshInstance3D", true, false):
 		_avatar_meshes.append(node as MeshInstance3D)
 	_map_expressions(gltf_state)
+	_frame_camera()
 	_update_mouse_passthrough()
+	return gltf_state
+
+
+# Encuadra el cuerpo entero en la ventana, sea cual sea la altura del modelo.
+func _frame_camera() -> void:
+	if _avatar_meshes.is_empty():
+		return
+	var box := _avatar_aabb()
+	var half_fov := deg_to_rad(_camera.fov) / 2.0
+	var height := box.size.y * 1.08
+	var distance := (height / 2.0) / tan(half_fov)
+	var center := box.get_center()
+	_camera.rotation = Vector3.ZERO
+	_camera.position = Vector3(center.x, center.y, center.z + distance + box.size.z / 2.0)
+
+
+func _avatar_aabb() -> AABB:
+	var box := AABB()
+	var first := true
+	for mesh in _avatar_meshes:
+		var world := mesh.global_transform * mesh.get_aabb()
+		box = world if first else box.merge(world)
+		first = false
+	return box
 
 
 # Huesos humanoides desde la extensión VRM del modelo (VRMC_vrm en 1.0; VRM en 0.x).
@@ -359,11 +408,14 @@ func _apply_constraints() -> void:
 # buscan por nombre: get_scene_node() devuelve las ImporterMeshInstance3D originales, que
 # generate_scene() ya reemplazó (y liberó) por MeshInstance3D.
 func _map_expressions(state: GLTFState) -> void:
-	var vrm: Dictionary = state.json.get("extensions", {}).get("VRMC_vrm", {})
-	var presets: Dictionary = vrm.get("expressions", {}).get("preset", {})
 	var mesh_by_name := {}
 	for mesh in _avatar_meshes:
 		mesh_by_name[str(mesh.name)] = mesh
+	if _vrm0:
+		_map_expressions_vrm0(state, mesh_by_name)
+		return
+	var vrm: Dictionary = state.json.get("extensions", {}).get("VRMC_vrm", {})
+	var presets: Dictionary = vrm.get("expressions", {}).get("preset", {})
 	var nodes := state.get_nodes()
 	for preset in presets:
 		var binds := []
@@ -374,6 +426,36 @@ func _map_expressions(state: GLTFState) -> void:
 			var mesh: MeshInstance3D = mesh_by_name.get((nodes[node_idx] as GLTFNode).resource_name)
 			if mesh:
 				binds.append([mesh, int(bind.get("index", 0)), float(bind.get("weight", 1.0))])
+		if not binds.is_empty():
+			_expressions[preset] = binds
+
+
+# VRM 0.x: blendShapeMaster con nombres de preset propios (joy, sorrow, a…) y binds por índice
+# de malla con peso 0-100. Se traducen a los nombres de VRM 1.0, que son los que usan las
+# animaciones VRMA.
+const VRM0_PRESETS := {
+	"joy": "happy", "angry": "angry", "sorrow": "sad", "fun": "relaxed", "neutral": "neutral",
+	"blink": "blink", "blink_l": "blinkLeft", "blink_r": "blinkRight",
+	"a": "aa", "i": "ih", "u": "ou", "e": "ee", "o": "oh",
+	"lookup": "lookUp", "lookdown": "lookDown", "lookleft": "lookLeft", "lookright": "lookRight",
+}
+
+func _map_expressions_vrm0(state: GLTFState, mesh_by_name: Dictionary) -> void:
+	var json: Dictionary = state.json
+	var groups: Array = json.get("extensions", {}).get("VRM", {}).get("blendShapeMaster", {}).get("blendShapeGroups", [])
+	var json_nodes: Array = json.get("nodes", [])
+	for group in groups:
+		var preset: String = VRM0_PRESETS.get(str(group.get("presetName", "")).to_lower(), "")
+		if preset.is_empty():
+			continue
+		var binds := []
+		for bind in group.get("binds", []):
+			# Todas las instancias de esa malla (una malla puede estar en varios nodos).
+			for node in json_nodes:
+				if int(node.get("mesh", -1)) == int(bind.get("mesh", -2)):
+					var mesh: MeshInstance3D = mesh_by_name.get(str(node.get("name", "")))
+					if mesh:
+						binds.append([mesh, int(bind.get("index", 0)), float(bind.get("weight", 100.0)) / 100.0])
 		if not binds.is_empty():
 			_expressions[preset] = binds
 
@@ -473,6 +555,144 @@ func _on_watch() -> void:
 		_last_command_id = command_id
 		if command.has("play"):
 			play_clip(str(command.play))
+		elif command.has("preview_model"):
+			_switch_model(str(command.preview_model), command_id)
+			say("Probando modelo: %s" % str(command.preview_model).get_file(), "info", 4.0)
+		elif command.has("restore_model") or command.has("reload_avatar"):
+			_avatar = _load_avatar_profile()
+			_load_clips()
+			_fill_animations_menu()
+			_switch_model(_avatar.model, command_id)
+
+
+# --- Probador de modelos ------------------------------------------------------------------
+# La app pide cargar un modelo (preview_model) y lee el informe en user://model_report.json:
+# formato, huesos humanoides, expresiones, peso frente al presupuesto del equipo y, por cada
+# animación cargada, qué huesos usa que el modelo no tiene.
+
+const REPORT_PATH := "user://model_report.json"
+const REQUIRED_BONES := ["hips", "spine", "head",
+	"leftUpperArm", "leftLowerArm", "leftHand", "rightUpperArm", "rightLowerArm", "rightHand",
+	"leftUpperLeg", "leftLowerLeg", "leftFoot", "rightUpperLeg", "rightLowerLeg", "rightFoot"]
+const RECOMMENDED_BONES := ["neck", "chest", "leftShoulder", "rightShoulder",
+	"leftIndexProximal", "rightIndexProximal", "leftThumbProximal", "rightThumbProximal"]
+# Presupuesto para este equipo (Intel integrada, texturas sin comprimir en tiempo de ejecución).
+const BUDGET_TRIANGLES := 70000
+const BUDGET_MATERIALS := 20
+const BUDGET_MAX_TEXTURE := 2048
+const BUDGET_BIG_TEXTURES := 4
+
+func _switch_model(path: String, command_id: int) -> void:
+	var state := _load_avatar(path)
+	var report := _build_report(state, path) if state else {
+		ok = false, error = "No se pudo leer el archivo como glTF/VRM.", path = path }
+	report.command_id = command_id
+	var file := FileAccess.open(REPORT_PATH, FileAccess.WRITE)
+	if file:
+		file.store_string(JSON.stringify(report, "\t"))
+
+
+func _build_report(state: GLTFState, path: String) -> Dictionary:
+	var json: Dictionary = state.json
+	var ext: Dictionary = json.get("extensions", {})
+	var meta: Dictionary = ext.get("VRMC_vrm", {}).get("meta", ext.get("VRM", {}).get("meta", {}))
+
+	var triangles := 0
+	var vertices := 0
+	var accessors: Array = json.get("accessors", [])
+	for mesh in json.get("meshes", []):
+		for prim in mesh.get("primitives", []):
+			var count := int(accessors[int(prim.attributes.POSITION)].get("count", 0))
+			vertices += count
+			triangles += int(accessors[int(prim.indices)].get("count", 0)) / 3 if prim.has("indices") else count / 3
+
+	var max_texture := 0
+	var big_textures := 0
+	for image in state.get_images():
+		if image:
+			var side := maxi(image.get_width(), image.get_height())
+			max_texture = maxi(max_texture, side)
+			if side >= BUDGET_MAX_TEXTURE:
+				big_textures += 1
+
+	var spring_joints := 0
+	for spring in ext.get("VRMC_springBone", {}).get("springs", []):
+		spring_joints += spring.get("joints", []).size()
+	var uses_mtoon: bool = json.get("extensionsUsed", []).has("VRMC_materials_mtoon") or ext.has("VRM")
+
+	var missing_required := REQUIRED_BONES.filter(func(b): return not _human.has(b))
+	var missing_recommended := RECOMMENDED_BONES.filter(func(b): return not _human.has(b))
+	var materials: int = json.get("materials", []).size()
+	var vrm_version := "1.0" if ext.has("VRMC_vrm") else ("0.x" if ext.has("VRM") else "")
+
+	var warnings := []
+	var errors := []
+	if vrm_version.is_empty():
+		errors.append("No es un VRM: falta el esqueleto humanoide, así que no se puede animar. Conviértelo con Blender + VRM Add-on o UniVRM.")
+	elif not missing_required.is_empty():
+		errors.append("Faltan huesos humanoides obligatorios: %s." % ", ".join(missing_required))
+	if _skeleton == null:
+		errors.append("El modelo no tiene esqueleto (no está riggeado).")
+	if vrm_version == "0.x":
+		warnings.append("VRM 0.x: compatible (se gira y se traducen las expresiones), pero VRM 1.0 es lo recomendado.")
+	if not _expressions.has("blink"):
+		warnings.append("Sin expresión «blink»: no va a parpadear.")
+	if not missing_recommended.is_empty():
+		warnings.append("Huesos recomendados que faltan: %s (esas partes quedan rígidas)." % ", ".join(missing_recommended))
+	if triangles > BUDGET_TRIANGLES:
+		warnings.append("%d triángulos: más que el presupuesto (%d); puede consumir más." % [triangles, BUDGET_TRIANGLES])
+	if materials > BUDGET_MATERIALS:
+		warnings.append("%d materiales: más que el presupuesto (%d)." % [materials, BUDGET_MATERIALS])
+	if max_texture > BUDGET_MAX_TEXTURE:
+		warnings.append("Texturas de %d px: más que el máximo recomendado (%d)." % [max_texture, BUDGET_MAX_TEXTURE])
+	if big_textures > BUDGET_BIG_TEXTURES:
+		warnings.append("%d texturas de %d px o más: conviene bajar algunas a 1024." % [big_textures, BUDGET_MAX_TEXTURE])
+	if spring_joints > 0:
+		warnings.append("Tiene física de pelo/ropa (%d huesos), que la mascota aún no simula: se moverán rígidos." % spring_joints)
+	if uses_mtoon:
+		warnings.append("Usa sombreado toon (MToon), que la mascota aún no aplica: se verá con sombreado plano.")
+
+	var animations := []
+	var clip_names := _clips.keys()
+	clip_names.sort()
+	for clip_name in clip_names:
+		var clip: AnimClip = _clips[clip_name]
+		var bones: Array = clip.bone_names()
+		var missing := bones.filter(func(b): return not _human.has(b))
+		var missing_expr := clip.expression_names().filter(func(e): return not _expressions.has(e))
+		animations.append({
+			name = clip_name,
+			bones = bones.size(),
+			missing_bones = missing,
+			missing_expressions = missing_expr,
+			coverage = 100 if bones.is_empty() else roundi(100.0 * (bones.size() - missing.size()) / bones.size()),
+		})
+
+	return {
+		ok = errors.is_empty(),
+		error = " ".join(errors),
+		path = path,
+		file_mb = snappedf(FileAccess.get_file_as_bytes(path).size() / 1e6, 0.1) if not path.begins_with("res://") else 0.0,
+		model = {
+			name = str(meta.get("name", meta.get("title", path.get_file().get_basename()))),
+			authors = meta.get("authors", [meta.get("author", "")]),
+			license = str(meta.get("licenseUrl", meta.get("licenseName", ""))),
+			vrm = vrm_version,
+			triangles = triangles,
+			vertices = vertices,
+			materials = materials,
+			max_texture = max_texture,
+			big_textures = big_textures,
+			humanoid_bones = _human.size(),
+			missing_required = missing_required,
+			missing_recommended = missing_recommended,
+			expressions = _expressions.keys(),
+			constraints = _constraints.size(),
+			spring_joints = spring_joints,
+		},
+		warnings = warnings,
+		animations = animations,
+	}
 
 
 # Cada tanto, si no está haciendo nada, una animación de reposo.
@@ -542,6 +762,8 @@ func _animate_body(delta: float) -> void:
 		var idx: int = _human.hips
 		var parent := _skeleton.get_bone_parent(idx)
 		var parent_basis := _skeleton.get_bone_global_rest(parent).basis if parent >= 0 else Basis.IDENTITY
+		if _vrm0:
+			hips_offset = Vector3(-hips_offset.x, hips_offset.y, -hips_offset.z)
 		_skeleton.set_bone_pose_position(idx, _skeleton.get_bone_rest(idx).origin + parent_basis.inverse() * hips_offset)
 
 	# Al final: los huesos auxiliares (ropa, giros de antebrazo) siguen a la pose ya armada.
@@ -588,6 +810,9 @@ func _look_rotation(delta: float) -> Quaternion:
 # huesos (la cabeza) tienen el reposo rotado y girar sobre su "Y" local la inclinaba.
 # Encadenado por la jerarquía, esto reproduce exactamente el esqueleto normalizado de VRM.
 func _pose_bone(idx: int, rotation_delta: Quaternion) -> void:
+	if _vrm0:
+		# Girar 180° en Y la convención (+Z de VRM 1.0 -> -Z de VRM 0.x), como three-vrm.
+		rotation_delta = Quaternion(-rotation_delta.x, rotation_delta.y, -rotation_delta.z, rotation_delta.w)
 	var rest := _skeleton.get_bone_rest(idx).basis.get_rotation_quaternion()
 	var global_rest := _skeleton.get_bone_global_rest(idx).basis.get_rotation_quaternion()
 	_skeleton.set_bone_pose_rotation(idx, rest * (global_rest.inverse() * rotation_delta * global_rest))
@@ -744,6 +969,10 @@ func _handle_screenshot_arg() -> void:
 		if arg.begins_with("--look="):
 			var parts := arg.trim_prefix("--look=").split(",")
 			_fixed_look = Vector2(parts[0].to_float(), parts[1].to_float())
+		elif arg.begins_with("--model="):
+			# Igual que el probador de la app: carga el modelo y escribe user://model_report.json.
+			_switch_model(arg.trim_prefix("--model="), 0)
+			print("Informe: ", ProjectSettings.globalize_path(REPORT_PATH))
 		elif arg.begins_with("--clip="):
 			play_clip(arg.trim_prefix("--clip="))
 			print("Clips disponibles: ", _clips.keys())
