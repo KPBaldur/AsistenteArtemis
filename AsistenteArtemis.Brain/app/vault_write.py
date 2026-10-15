@@ -4,7 +4,10 @@
 Operaciones:
 - agregar un pendiente a `## Abiertos` de 01-proyectos/<slug>/pendientes.md;
 - agregar una entrada "(artemis)" al final de 01-proyectos/<slug>/bitacora.md;
-- crear un proyecto nuevo en estado `idea` (ficha, pendientes y bitácora).
+- crear un proyecto nuevo en estado `idea` (ficha, pendientes y bitácora);
+- dejar una captura en `00-inbox/`.
+
+Cada operación deja además una línea en la nota del día (`03-diario/`), en el mismo commit.
 
 Ambas actualizan `actualizado` de la ficha del proyecto y hacen un commit local con autor
 Artemis y prefijo `artemis:`. Nunca hacen push (desde este equipo el push lo corre Kevin) y
@@ -16,7 +19,7 @@ import re
 import shutil
 import unicodedata
 import threading
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from app import vault
@@ -125,7 +128,8 @@ def add_pendiente(slug: str, text: str) -> dict:
 
         card = folder / f"{slug}.md"
         _write(card, _touch_actualizado(_read(card), today))
-        commit = _commit([path, card], f"artemis: pendiente en {slug}")
+        diario = _log_diario(slug, f"pendiente agregado: {text}")
+        commit = _commit([path, card, *diario], f"artemis: pendiente en {slug}")
     logger.info("Pendiente agregado en %s (%s)", slug, commit)
     return {"project": slug, "file": f"01-proyectos/{slug}/pendientes.md", "line": new_line, "commit": commit}
 
@@ -146,7 +150,9 @@ def add_comentario(slug: str, text: str) -> dict:
         entry = f"## [{today}] Comentario (artemis)\n\n{text}"
         _write(path, _touch_actualizado(f"{current}\n\n{entry}\n", today))
         _write(card, _touch_actualizado(_read(card), today))
-        commit = _commit([path, card], f"artemis: comentario en {slug}")
+        summary = " ".join(text.split())
+        diario = _log_diario(slug, f"comentario en la bitácora: {summary[:200]}{'…' if len(summary) > 200 else ''}")
+        commit = _commit([path, card, *diario], f"artemis: comentario en {slug}")
     logger.info("Comentario agregado en %s (%s)", slug, commit)
     return {"project": slug, "file": f"01-proyectos/{slug}/bitacora.md", "commit": commit}
 
@@ -247,7 +253,8 @@ def create_project(nombre: str, resumen: str, ambito: str = "personal", stack: l
             ))
             _write(pendientes, _PENDIENTES_TEMPLATE.format(slug=slug, nombre=nombre, today=today))
             _write(bitacora, _bitacora_template(slug, nombre, today) + f"\n## [{today}] Idea registrada (artemis)\n\n{resumen}\n")
-            commit = _commit([card, pendientes, bitacora], f"artemis: proyecto idea {slug}")
+            diario = _log_diario(slug, f"proyecto idea creado: {resumen}")
+            commit = _commit([card, pendientes, bitacora, *diario], f"artemis: proyecto idea {slug}")
         except BaseException:
             # Sin dejar una carpeta a medias si falló la escritura o el commit.
             vault._git("reset", "-q", "--", base)
@@ -255,3 +262,122 @@ def create_project(nombre: str, resumen: str, ambito: str = "personal", stack: l
             raise
     logger.info("Proyecto idea creado: %s (%s)", slug, commit)
     return {"project": slug, "file": f"{base}/{slug}.md", "commit": commit}
+
+
+# ---------------------------------------------------------------------------
+# Diario (03-diario/AAAA/AAAA-MM-DD.md) y capturas (00-inbox/)
+# ---------------------------------------------------------------------------
+
+_DIARIO_TEMPLATE = """---
+tipo: diario
+fecha: {today}
+proyectos: []
+autor: artemis
+tags: ["diario"]
+---
+
+# {today}
+
+## Registro
+
+## Pendientes del día
+"""
+
+
+def _add_project_to_diario_front(text: str, slug: str) -> str:
+    """Suma `slug` a `proyectos: [...]` del frontmatter si no está."""
+    match = re.search(r"(?m)^proyectos:\s*(\[.*\])\s*$", text)
+    if not match:
+        return text
+    try:
+        slugs = json.loads(match.group(1))
+    except ValueError:
+        return text  # formato que no entiendo: no lo toco
+    if slug in slugs:
+        return text
+    return text[:match.start(1)] + json.dumps(slugs + [slug], ensure_ascii=False) + text[match.end(1):]
+
+
+def _log_diario(slug: str | None, entry: str, heading: str | None = None) -> list[Path]:
+    """Agrega un punto `- HH:MM entry` bajo `### <heading> (artemis)` de la nota de hoy, al final de
+    `## Registro`, y devuelve el archivo para sumarlo al commit.
+
+    Si ya hay una sección idéntica de Artemis de hoy, agrega el punto ahí; nunca edita secciones
+    de otros autores. Es de mejor esfuerzo: si falla, la escritura principal sigue (devuelve []).
+    """
+    try:
+        now = datetime.now()
+        today = now.date().isoformat()
+        path = vault.vault_root() / "03-diario" / today[:4] / f"{today}.md"
+        if heading is None:
+            card = vault.vault_root() / "01-proyectos" / slug / f"{slug}.md"
+            meta, _ = vault.parse_frontmatter(_read(card))
+            heading = f"proyecto · [[01-proyectos/{slug}/{slug}|{meta.get('nombre') or slug}]]"
+        header = f"### {heading} (artemis)"
+        bullet = f"- {now:%H:%M} {entry}"
+
+        if path.is_file():
+            text = _read(path)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            text = _DIARIO_TEMPLATE.format(today=today)
+        lines = text.split("\n")
+
+        reg = next((i for i, l in enumerate(lines) if l.strip() == "## Registro"), None)
+        if reg is None:
+            lines += ["", "## Registro", ""]
+            reg = len(lines) - 2
+        end = next((i for i in range(reg + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+
+        section = next((i for i in range(reg + 1, end) if lines[i].strip() == header), None)
+        if section is not None:
+            sec_end = next((i for i in range(section + 1, end) if lines[i].startswith("### ")), end)
+            insert_at = sec_end
+            while insert_at > section + 1 and not lines[insert_at - 1].strip():
+                insert_at -= 1
+            lines.insert(insert_at, bullet)
+        else:
+            insert_at = end
+            while insert_at > reg + 1 and not lines[insert_at - 1].strip():
+                insert_at -= 1
+            lines[insert_at:insert_at] = ["", header, "", bullet]
+            if insert_at + 4 < len(lines) and lines[insert_at + 4].strip():
+                lines.insert(insert_at + 4, "")  # línea en blanco antes del siguiente encabezado
+        text = "\n".join(lines)
+        if slug:
+            text = _add_project_to_diario_front(text, slug)
+        _write(path, text)
+        return [path]
+    except Exception:
+        logger.exception("No se pudo registrar en el diario (la escritura principal sigue)")
+        return []
+
+
+def create_captura(text: str, slug: str | None = None) -> dict:
+    """Deja una nota `tipo: captura` en `00-inbox/` (autor artemis, sin procesar) para que Kevin o el
+    skill `inbox` la rutee. `slug` es opcional: si se da, debe existir."""
+    text = _clean(text, single_line=False)
+    today = date.today().isoformat()
+    with _lock:
+        if slug:
+            _project_dir(slug)
+        now = datetime.now()
+        theme = slugify(" ".join(text.split()[:6]))[:40].strip("-") or "captura"
+        inbox = vault.vault_root() / "00-inbox"
+        inbox.mkdir(exist_ok=True)
+        name = f"{now:%Y-%m-%d-%H%M}-{theme}"
+        path = inbox / f"{name}.md"
+        n = 2
+        while path.exists():
+            path = inbox / f"{name}-{n}.md"
+            n += 1
+        title = " ".join(text.split())[:80]
+        _write(path, (
+            f"---\ntipo: captura\ncreado: {today}\nautor: artemis\nproyecto: {slug or ''}\n"
+            f"procesado: false\ntags: [\"inbox\"]\n---\n\n# {title}\n\n{text}\n"
+        ))
+        rel = path.relative_to(vault.vault_root()).as_posix()
+        diario = _log_diario(slug, f"captura en el inbox: [[{rel[:-3]}|{title}]]", heading="inbox")
+        commit = _commit([path, *diario], f"artemis: captura {theme}")
+    logger.info("Captura creada: %s (%s)", rel, commit)
+    return {"project": slug, "file": rel, "commit": commit}

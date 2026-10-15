@@ -62,6 +62,23 @@ TOOLS = [
     },
     {
         "type": "function",
+        "name": "proponer_captura",
+        "description": (
+            "Propone dejar una nota suelta en el inbox del cerebro (00-inbox) cuando lo que el usuario quiere "
+            "anotar NO encaja en un proyecto concreto ni es una idea de proyecto nuevo: un recordatorio, un "
+            "pensamiento, un dato. Kevin la rutea después. No escribe nada: el sistema pedirá confirmación."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "texto": {"type": "string", "description": "La nota, tal como la dijo el usuario, sin inventar nada."},
+                "proyecto": {"type": "string", "description": "Slug del proyecto relacionado, solo si es claro; vacío si no."},
+            },
+            "required": ["texto"],
+        },
+    },
+    {
+        "type": "function",
         "name": "investigar",
         "description": (
             "Investiga en la web una duda sobre un proyecto o una idea: legalidad (leyes, licencias, políticas "
@@ -100,18 +117,19 @@ TOOLS = [
 ]
 
 TOOLS_INSTRUCTION = """# Acciones sobre el cerebro de proyectos
-Si el usuario te pide anotar algo en un proyecto, usá la herramienta `proponer_pendiente` (si es una tarea por hacer) o `proponer_comentario` (si es contexto u observación de un proyecto que ya existe). El slug del proyecto debe ser uno de los de la lista de abajo; si no queda claro a cuál se refiere, preguntale en vez de adivinar. Si pregunta por legalidad, rentabilidad, competencia o viabilidad de algo, usá `investigar` (no respondas de memoria). Si cuenta una idea de proyecto nuevo, usá `proponer_proyecto_idea`. No digas que ya anotaste nada: el sistema le mostrará al usuario lo que se va a anotar y le pedirá confirmación."""
+Si el usuario te pide anotar algo en un proyecto, usá la herramienta `proponer_pendiente` (si es una tarea por hacer) o `proponer_comentario` (si es contexto u observación de un proyecto que ya existe). El slug del proyecto debe ser uno de los de la lista de abajo; si no queda claro a cuál se refiere, preguntale en vez de adivinar. Si pregunta por legalidad, rentabilidad, competencia o viabilidad de algo, usá `investigar` (no respondas de memoria). Si quiere anotar algo suelto que no es de ningún proyecto, usá `proponer_captura`. Si cuenta una idea de proyecto nuevo, usá `proponer_proyecto_idea`. No digas que ya anotaste nada: el sistema le mostrará al usuario lo que se va a anotar y le pedirá confirmación."""
 
 _KINDS = {
     "proponer_pendiente": "pendiente",
     "proponer_comentario": "comentario",
     "proponer_proyecto_idea": "proyecto",
+    "proponer_captura": "captura",
 }
 
 
 @dataclass
 class Proposal:
-    kind: str  # "pendiente" | "comentario" | "proyecto"
+    kind: str  # "pendiente" | "comentario" | "proyecto" | "captura"
     project: str  # slug (en "proyecto", el que se va a crear)
     text: str  # en "proyecto", el resumen
     nombre: str = ""
@@ -123,6 +141,8 @@ class Proposal:
             vault_write.add_pendiente(self.project, self.text)
         elif self.kind == "comentario":
             vault_write.add_comentario(self.project, self.text)
+        elif self.kind == "captura":
+            vault_write.create_captura(self.text, self.project or None)
         else:
             vault_write.create_project(self.nombre, self.text, self.ambito, self.stack)
 
@@ -217,7 +237,12 @@ def propose_from_interaction(session_id: uuid.UUID, interaction) -> str | None:
                 proposals.append(Proposal(kind, slug, text, nombre, ambito, stack))
             continue
         slug = str(args.get("proyecto") or "").strip()
-        if slug not in valid_ids:
+        if kind == "captura":
+            if not text:
+                problems.append("Me quedó vacía la nota.")
+            else:
+                proposals.append(Proposal(kind, slug if slug in valid_ids else "", text))
+        elif slug not in valid_ids:
             problems.append(f"No encuentro el proyecto «{slug}» en el cerebro.")
         elif not text:
             problems.append("Me quedó vacío el texto a anotar.")
@@ -230,7 +255,10 @@ def propose_from_interaction(session_id: uuid.UUID, interaction) -> str | None:
             _pending[session_id] = _Pending(proposals)
         lines.append("Esto es lo que voy a anotar en el cerebro:")
         for p in proposals:
-            if p.kind == "proyecto":
+            if p.kind == "captura":
+                rel = f" (relacionada con **{valid_ids[p.project]}**)" if p.project else ""
+                lines.append(f"- **Nota en el inbox**{rel}: {p.text}")
+            elif p.kind == "proyecto":
                 tech = f" · stack: {', '.join(p.stack)}" if p.stack else ""
                 lines.append(f"- **Proyecto nuevo «{p.nombre}»** (idea, {p.ambito}{tech}): {p.text}")
             else:
@@ -289,6 +317,6 @@ def resolve_pending(session_id: uuid.UUID, message: str) -> str | None:
 
     lines = []
     if done:
-        lines.append("Anotado ✅ " + "; ".join(f"proyecto idea {p.project}" if p.kind == "proyecto" else f"{p.kind} en {p.project}" for p in done) + ". Quedó en un commit local, sin push.")
+        lines.append("Anotado ✅ " + "; ".join((f"proyecto idea {p.project}" if p.kind == "proyecto" else "nota en el inbox" if p.kind == "captura" else f"{p.kind} en {p.project}") for p in done) + ". Quedó en un commit local, sin push.")
     lines.extend(failed)
     return "\n".join(lines)
