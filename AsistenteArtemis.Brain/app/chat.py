@@ -6,7 +6,7 @@ from google import genai
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app import vault
+from app import actions, vault
 from app.config import GEMINI_API_KEY, INTERNAL_API_KEY, VAULT_ENABLED, VAULT_OWNER_USER_ID
 from app.db import get_db
 from app.embeddings import embed_texts
@@ -92,7 +92,9 @@ def _vault_section(db: Session, user_id: uuid.UUID, query_vector: list[float]) -
         .all()
     )
     fragments = "\n\n".join(text for (text,) in rows) if rows else "(el vault todavía no está indexado)"
-    return f"""# Estado de los proyectos del usuario (cerebro de proyectos)
+    return f"""{actions.tools_instruction_with_projects()}
+
+# Estado de los proyectos del usuario (cerebro de proyectos)
 {status}
 
 # Fragmentos relevantes del cerebro de proyectos
@@ -144,6 +146,13 @@ def _build_prompt(
 
 @router.post("/chat", response_model=ChatResponse, dependencies=[Depends(require_internal_key)])
 def chat(request: ChatRequest, db: Session = Depends(get_db)) -> ChatResponse:
+    is_vault_owner = VAULT_ENABLED and str(request.user_id) == VAULT_OWNER_USER_ID
+    if is_vault_owner:
+        # Respuesta a una propuesta de escritura del turno anterior (sí/no): no gasta Gemini.
+        pending_reply = actions.resolve_pending(request.session_id, request.message)
+        if pending_reply is not None:
+            return ChatResponse(reply=pending_reply)
+
     system_instruction = build_system_instruction(db, request.user_id)
     [query_vector] = embed_texts([request.message], task_type="RETRIEVAL_QUERY")
     note_chunks = _retrieve_note_chunks(db, request.user_id, query_vector)
@@ -160,8 +169,14 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)) -> ChatResponse:
             model=CHAT_MODEL,
             input=prompt,
             generation_config={"thinking_level": "low"},
+            **({"tools": actions.TOOLS} if is_vault_owner else {}),
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"No se pudo generar la respuesta (falló la API de Gemini): {e}")
+
+    if is_vault_owner:
+        confirmation = actions.propose_from_interaction(request.session_id, interaction)
+        if confirmation is not None:
+            return ChatResponse(reply=confirmation)
 
     return ChatResponse(reply=interaction.output_text)
