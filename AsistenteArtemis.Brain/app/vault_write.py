@@ -1,16 +1,20 @@
 """Escritura acotada en el cerebro de proyectos (iteración 2 del contrato con Artemis,
 99-sistema/contrato-artemis.md en BrainObsidian).
 
-Solo dos operaciones, las que usa la mascota:
+Operaciones:
 - agregar un pendiente a `## Abiertos` de 01-proyectos/<slug>/pendientes.md;
-- agregar una entrada "(artemis)" al final de 01-proyectos/<slug>/bitacora.md.
+- agregar una entrada "(artemis)" al final de 01-proyectos/<slug>/bitacora.md;
+- crear un proyecto nuevo en estado `idea` (ficha, pendientes y bitácora).
 
 Ambas actualizan `actualizado` de la ficha del proyecto y hacen un commit local con autor
 Artemis y prefijo `artemis:`. Nunca hacen push (desde este equipo el push lo corre Kevin) y
 nunca reescriben ni borran líneas existentes.
 """
+import json
 import logging
 import re
+import shutil
+import unicodedata
 import threading
 from datetime import date
 from pathlib import Path
@@ -145,3 +149,109 @@ def add_comentario(slug: str, text: str) -> dict:
         commit = _commit([path, card], f"artemis: comentario en {slug}")
     logger.info("Comentario agregado en %s (%s)", slug, commit)
     return {"project": slug, "file": f"01-proyectos/{slug}/bitacora.md", "commit": commit}
+
+
+def slugify(name: str) -> str:
+    """kebab-case sin tildes, como exige el vault para el slug (= `id`) del proyecto."""
+    text = unicodedata.normalize("NFD", name.lower())
+    text = "".join(c for c in text if unicodedata.category(c) != "Mn")
+    return re.sub(r"[^a-z0-9]+", "-", text).strip("-")[:60].strip("-")
+
+
+_STACK_RE = re.compile(r"^[a-z0-9][a-z0-9.+-]*$")
+_AMBITOS = ("personal", "trabajo")
+
+_CARD_TEMPLATE = """---
+tipo: proyecto
+id: {slug}
+nombre: {nombre_yaml}
+estado: idea
+ambito: {ambito}
+fase:
+inicio: {today}
+actualizado: {today}
+resumen: {resumen_yaml}
+stack: {stack_yaml}
+repo: []
+repo_local: []
+relacionados: []
+tags: ["proyecto", "{ambito}"]
+---
+
+# {nombre}
+
+> {resumen}
+
+[[{base}/pendientes|Pendientes]] · [[{base}/decisiones|Decisiones]] · [[{base}/recursos|Recursos]] · [[{base}/bitacora|Bitácora]]
+
+## Estado actual
+
+Idea registrada el {today} por Artemis. Todavía sin trabajo iniciado.
+
+## Objetivo
+
+## Stack y recursos principales
+
+## Lecciones aprendidas
+
+## Próximos pasos
+
+Viven en [[{base}/pendientes|pendientes]].
+"""
+
+_PENDIENTES_TEMPLATE = """---
+tipo: pendientes
+proyecto: {slug}
+actualizado: {today}
+tags: ["pendientes"]
+---
+
+# Pendientes — {nombre}
+
+## Abiertos
+
+## Resueltos
+"""
+
+
+def create_project(nombre: str, resumen: str, ambito: str = "personal", stack: list[str] | None = None) -> dict:
+    """Crea `01-proyectos/<slug>/` con ficha (`estado: idea`), pendientes y bitácora.
+    Nunca pisa un proyecto existente."""
+    nombre = _clean(nombre, single_line=True)
+    resumen = _clean(resumen, single_line=True)
+    if ambito not in _AMBITOS:
+        raise VaultWriteError(f"Ámbito inválido: {ambito!r} (personal o trabajo)")
+    slug = slugify(nombre)
+    if not _SLUG_RE.match(slug):
+        raise VaultWriteError(f"No pude armar un slug válido a partir de «{nombre}»")
+    stack = [t.strip().lower() for t in (stack or []) if t and t.strip()]
+    bad = [t for t in stack if not _STACK_RE.match(t)]
+    if bad:
+        raise VaultWriteError(f"Tecnologías inválidas en el stack (minúscula kebab-case): {bad}")
+    today = date.today().isoformat()
+    base = f"01-proyectos/{slug}"
+    with _lock:
+        folder = vault.vault_root() / base
+        if folder.exists():
+            raise VaultWriteError(f"Ya existe un proyecto con el slug «{slug}»")
+        folder.mkdir(parents=True)
+        try:
+            card = folder / f"{slug}.md"
+            pendientes = folder / "pendientes.md"
+            bitacora = folder / "bitacora.md"
+            _write(card, _CARD_TEMPLATE.format(
+                slug=slug, nombre=nombre, resumen=resumen, ambito=ambito, today=today, base=base,
+                nombre_yaml=json.dumps(nombre, ensure_ascii=False),
+                resumen_yaml=json.dumps(resumen, ensure_ascii=False),
+                stack_yaml=json.dumps(stack, ensure_ascii=False),
+            ))
+            _write(pendientes, _PENDIENTES_TEMPLATE.format(slug=slug, nombre=nombre, today=today))
+            _write(bitacora, _bitacora_template(slug, nombre, today) + f"\n## [{today}] Idea registrada (artemis)\n\n{resumen}\n")
+            commit = _commit([card, pendientes, bitacora], f"artemis: proyecto idea {slug}")
+        except BaseException:
+            # Sin dejar una carpeta a medias si falló la escritura o el commit.
+            vault._git("reset", "-q", "--", base)
+            shutil.rmtree(folder, ignore_errors=True)
+            raise
+    logger.info("Proyecto idea creado: %s (%s)", slug, commit)
+    return {"project": slug, "file": f"{base}/{slug}.md", "commit": commit}

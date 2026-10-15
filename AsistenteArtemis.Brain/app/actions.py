@@ -60,22 +60,53 @@ TOOLS = [
             "required": ["proyecto", "texto"],
         },
     },
+    {
+        "type": "function",
+        "name": "proponer_proyecto_idea",
+        "description": (
+            "Propone registrar una IDEA de proyecto nuevo (por ejemplo: «se me ocurrió un videojuego de X, "
+            "anótalo como proyecto futuro»). Crea un proyecto en estado «idea». No escribe nada: el sistema "
+            "pedirá confirmación. Úsala solo si la idea NO corresponde a un proyecto que ya existe en la lista."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "nombre": {"type": "string", "description": "Nombre corto del proyecto (el que diga el usuario o uno descriptivo)."},
+                "resumen": {"type": "string", "description": "1–2 frases: qué es la idea, con lo que dijo el usuario, sin inventar detalles."},
+                "ambito": {"type": "string", "enum": ["personal", "trabajo"], "description": "«personal» salvo que el usuario diga que es de trabajo."},
+                "stack": {"type": "array", "items": {"type": "string"}, "description": "Tecnologías mencionadas por el usuario, en minúscula kebab-case (ej. «unity»). Vacío si no mencionó ninguna."},
+            },
+            "required": ["nombre", "resumen"],
+        },
+    },
 ]
 
 TOOLS_INSTRUCTION = """# Acciones sobre el cerebro de proyectos
-Si el usuario te pide anotar algo en un proyecto, usá la herramienta `proponer_pendiente` (si es una tarea por hacer) o `proponer_comentario` (si es una idea o contexto). El slug del proyecto debe ser uno de los de la lista de abajo; si no queda claro a cuál se refiere, preguntale en vez de adivinar. No digas que ya anotaste nada: el sistema le mostrará al usuario lo que se va a anotar y le pedirá confirmación."""
+Si el usuario te pide anotar algo en un proyecto, usá la herramienta `proponer_pendiente` (si es una tarea por hacer) o `proponer_comentario` (si es contexto u observación de un proyecto que ya existe). El slug del proyecto debe ser uno de los de la lista de abajo; si no queda claro a cuál se refiere, preguntale en vez de adivinar. Si cuenta una idea de proyecto nuevo, usá `proponer_proyecto_idea`. No digas que ya anotaste nada: el sistema le mostrará al usuario lo que se va a anotar y le pedirá confirmación."""
 
-_OPERATIONS = {
-    "proponer_pendiente": ("pendiente", vault_write.add_pendiente),
-    "proponer_comentario": ("comentario", vault_write.add_comentario),
+_KINDS = {
+    "proponer_pendiente": "pendiente",
+    "proponer_comentario": "comentario",
+    "proponer_proyecto_idea": "proyecto",
 }
 
 
 @dataclass
 class Proposal:
-    kind: str  # "pendiente" | "comentario"
-    project: str
-    text: str
+    kind: str  # "pendiente" | "comentario" | "proyecto"
+    project: str  # slug (en "proyecto", el que se va a crear)
+    text: str  # en "proyecto", el resumen
+    nombre: str = ""
+    ambito: str = "personal"
+    stack: list[str] = field(default_factory=list)
+
+    def execute(self) -> None:
+        if self.kind == "pendiente":
+            vault_write.add_pendiente(self.project, self.text)
+        elif self.kind == "comentario":
+            vault_write.add_comentario(self.project, self.text)
+        else:
+            vault_write.create_project(self.nombre, self.text, self.ambito, self.stack)
 
 
 @dataclass
@@ -105,7 +136,7 @@ def _function_calls(interaction) -> list[tuple[str, dict]]:
 def propose_from_interaction(session_id: uuid.UUID, interaction) -> str | None:
     """Si el modelo pidió proponer algo, guarda las propuestas válidas y devuelve el texto
     de confirmación (o el de error). Devuelve None si no pidió ninguna herramienta."""
-    calls = [(n, a) for n, a in _function_calls(interaction) if n in _OPERATIONS]
+    calls = [(n, a) for n, a in _function_calls(interaction) if n in _KINDS]
     if not calls:
         return None
 
@@ -113,9 +144,21 @@ def propose_from_interaction(session_id: uuid.UUID, interaction) -> str | None:
     proposals: list[Proposal] = []
     problems: list[str] = []
     for name, args in calls:
-        kind, _ = _OPERATIONS[name]
+        kind = _KINDS[name]
+        text = " ".join(str(args.get("texto" if kind != "proyecto" else "resumen") or "").split())
+        if kind == "proyecto":
+            nombre = " ".join(str(args.get("nombre") or "").split())
+            slug = vault_write.slugify(nombre)
+            stack = [str(t) for t in (args.get("stack") or []) if isinstance(t, str)]
+            ambito = args.get("ambito") if args.get("ambito") in ("personal", "trabajo") else "personal"
+            if not slug or not text:
+                problems.append("Me falta el nombre o la descripción de la idea.")
+            elif slug in valid_ids or any(p.kind == "proyecto" and p.project == slug for p in proposals):
+                problems.append(f"Ya existe un proyecto «{slug}» en el cerebro.")
+            else:
+                proposals.append(Proposal(kind, slug, text, nombre, ambito, stack))
+            continue
         slug = str(args.get("proyecto") or "").strip()
-        text = " ".join(str(args.get("texto") or "").split())
         if slug not in valid_ids:
             problems.append(f"No encuentro el proyecto «{slug}» en el cerebro.")
         elif not text:
@@ -129,8 +172,12 @@ def propose_from_interaction(session_id: uuid.UUID, interaction) -> str | None:
             _pending[session_id] = _Pending(proposals)
         lines.append("Esto es lo que voy a anotar en el cerebro:")
         for p in proposals:
-            donde = "pendientes" if p.kind == "pendiente" else "bitácora"
-            lines.append(f"- **{valid_ids[p.project]}** ({donde}): {p.text}")
+            if p.kind == "proyecto":
+                tech = f" · stack: {', '.join(p.stack)}" if p.stack else ""
+                lines.append(f"- **Proyecto nuevo «{p.nombre}»** (idea, {p.ambito}{tech}): {p.text}")
+            else:
+                donde = "pendientes" if p.kind == "pendiente" else "bitácora"
+                lines.append(f"- **{valid_ids[p.project]}** ({donde}): {p.text}")
         lines.append("¿Confirmas? (sí / no)")
     else:
         with _lock:
@@ -173,9 +220,8 @@ def resolve_pending(session_id: uuid.UUID, message: str) -> str | None:
 
     done, failed = [], []
     for p in pending.proposals:
-        _, operation = _OPERATIONS["proponer_pendiente" if p.kind == "pendiente" else "proponer_comentario"]
         try:
-            operation(p.project, p.text)
+            p.execute()
             done.append(p)
         except vault_write.VaultWriteError as e:
             failed.append(f"- No pude anotar en {p.project}: {e}")
@@ -185,6 +231,6 @@ def resolve_pending(session_id: uuid.UUID, message: str) -> str | None:
 
     lines = []
     if done:
-        lines.append("Anotado ✅ " + "; ".join(f"{p.kind} en {p.project}" for p in done) + ". Quedó en un commit local, sin push.")
+        lines.append("Anotado ✅ " + "; ".join(f"proyecto idea {p.project}" if p.kind == "proyecto" else f"{p.kind} en {p.project}" for p in done) + ". Quedó en un commit local, sin push.")
     lines.extend(failed)
     return "\n".join(lines)

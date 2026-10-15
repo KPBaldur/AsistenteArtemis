@@ -103,6 +103,40 @@ class ActionsTest(unittest.TestCase):
         self.assertIsNone(actions.resolve_pending(self.session, "sí"))
         self.assertNotIn("Vieja", self._pendientes())
 
+    def _idea(self, **over):
+        args = dict(nombre="Pingüino asesino de mapaches zombies",
+                    resumen="Videojuego donde un pingüino caza mapaches zombies.",
+                    ambito="personal", stack=["unity"])
+        args.update(over)
+        return _interaction(_call("proponer_proyecto_idea", **args))
+
+    def test_new_project_idea_flow(self):
+        reply = actions.propose_from_interaction(self.session, self._idea())
+        self.assertIn("Proyecto nuevo", reply)
+        self.assertFalse((Path(_TMP.name) / "01-proyectos/pinguino-asesino-de-mapaches-zombies").exists())
+        self.assertIn("Anotado", actions.resolve_pending(self.session, "dale"))
+        folder = Path(_TMP.name) / "01-proyectos/pinguino-asesino-de-mapaches-zombies"
+        card = (folder / "pinguino-asesino-de-mapaches-zombies.md").read_text(encoding="utf-8")
+        self.assertIn("estado: idea", card)
+        self.assertIn('stack: ["unity"]', card)
+        self.assertIn("id: pinguino-asesino-de-mapaches-zombies", card)
+        self.assertTrue((folder / "pendientes.md").is_file() and (folder / "bitacora.md").is_file())
+        status = subprocess.run(["git", "-C", _TMP.name, "status", "--porcelain"], capture_output=True, text=True).stdout
+        self.assertEqual(status.strip(), "")  # todo quedó commiteado
+
+    def test_duplicate_project_idea_is_rejected(self):
+        reply = actions.propose_from_interaction(self.session, self._idea(nombre="FinanzasHogar"))
+        self.assertIn("Ya existe", reply)
+        self.assertIsNone(actions.resolve_pending(self.session, "sí"))
+
+    def test_invalid_stack_leaves_no_folder(self):
+        with self.assertRaises(actions.vault_write.VaultWriteError):
+            actions.vault_write.create_project("Otra Idea", "Algo.", "personal", ["Unity 6!"])
+        self.assertFalse((Path(_TMP.name) / "01-proyectos/otra-idea").exists())
+
+    def test_slugify(self):
+        self.assertEqual(actions.vault_write.slugify("  ¡Pingüino Ñandú & Co.! "), "pinguino-nandu-co")
+
 
 if __name__ == "__main__":
     unittest.main()
