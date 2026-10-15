@@ -5,7 +5,8 @@ Operaciones:
 - agregar un pendiente a `## Abiertos` de 01-proyectos/<slug>/pendientes.md;
 - agregar una entrada "(artemis)" al final de 01-proyectos/<slug>/bitacora.md;
 - crear un proyecto nuevo en estado `idea` (ficha, pendientes y bitácora);
-- dejar una captura en `00-inbox/`.
+- dejar una captura en `00-inbox/`;
+- mover un pendiente de `## Abiertos` a `## Resueltos`.
 
 Cada operación deja además una línea en la nota del día (`03-diario/`), en el mismo commit.
 
@@ -381,3 +382,116 @@ def create_captura(text: str, slug: str | None = None) -> dict:
         commit = _commit([path, *diario], f"artemis: captura {theme}")
     logger.info("Captura creada: %s (%s)", rel, commit)
     return {"project": slug, "file": rel, "commit": commit}
+
+
+# ---------------------------------------------------------------------------
+# Resolver pendientes: mover una tarea de `## Abiertos` a `## Resueltos`
+# ---------------------------------------------------------------------------
+
+_OPEN_RE = re.compile(r"^- \[ \] (.+)$")
+
+
+def _norm(text: str) -> str:
+    text = unicodedata.normalize("NFD", text.lower())
+    text = "".join(c for c in text if unicodedata.category(c) != "Mn")
+    return " ".join(re.sub(r"[^a-z0-9 ]", " ", text).split())
+
+
+def _sections(lines: list[str], slug: str) -> tuple[int, int, int, int]:
+    """(inicio, fin) de `## Abiertos` y de `## Resueltos` (fin = índice del siguiente `## ` o del final).
+    `## Resueltos` puede faltar: devuelve -1, -1."""
+    def bounds(title: str) -> tuple[int, int]:
+        start = next((i for i, l in enumerate(lines) if l.strip() == title), None)
+        if start is None:
+            return -1, -1
+        end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+        return start, end
+
+    a_start, a_end = bounds("## Abiertos")
+    if a_start == -1:
+        raise VaultWriteError(f"pendientes.md de «{slug}» no tiene la sección ## Abiertos")
+    r_start, r_end = bounds("## Resueltos")
+    return a_start, a_end, r_start, r_end
+
+
+def find_open_pendientes(slug: str, fragment: str) -> list[str]:
+    """Pendientes abiertos de `slug` que corresponden a `fragment` (texto aproximado, sin tildes ni
+    mayúsculas). Devuelve el texto completo de cada uno (sin `- [ ] `). Primero busca el fragmento
+    como subcadena; si no aparece, por palabras en común (al menos 60 % de las del fragmento) y se
+    queda con las de mayor coincidencia."""
+    wanted = _norm(fragment)
+    if not wanted:
+        raise VaultWriteError("No me dijiste cuál pendiente")
+    path = _project_dir(slug) / "pendientes.md"
+    if not path.is_file():
+        raise VaultWriteError(f"El proyecto «{slug}» no tiene pendientes.md")
+    lines = _read(path).split("\n")
+    a_start, a_end, _, _ = _sections(lines, slug)
+    items = [m.group(1) for l in lines[a_start + 1:a_end] if (m := _OPEN_RE.match(l))]
+
+    exact = [t for t in items if wanted in _norm(t)]
+    if exact:
+        return exact
+    words = [w for w in wanted.split() if len(w) >= 3]
+    if not words:
+        return []
+    scored = []
+    for t in items:
+        have = set(_norm(t).split())
+        score = sum(1 for w in words if w in have) / len(words)
+        if score >= 0.6:
+            scored.append((score, t))
+    if not scored:
+        return []
+    best = max(score for score, _ in scored)
+    return [t for score, t in scored if score == best]
+
+
+def resolve_pendiente(slug: str, item: str) -> dict:
+    """Mueve el pendiente `- [ ] <item>` de `## Abiertos` a `## Resueltos` como
+    `- [x] <item> · resuelto AAAA-MM-DD` (con sus líneas de continuación, si tiene). `item` debe ser
+    exactamente el texto de un pendiente abierto (el de `find_open_pendientes`)."""
+    item = " ".join((item or "").split())  # sin tope de largo: es un pendiente que ya existe
+    if not item:
+        raise VaultWriteError("El texto está vacío")
+    today = date.today().isoformat()
+    with _lock:
+        folder = _project_dir(slug)
+        path = folder / "pendientes.md"
+        if not path.is_file():
+            raise VaultWriteError(f"El proyecto «{slug}» no tiene pendientes.md")
+        lines = _read(path).split("\n")
+        a_start, a_end, r_start, r_end = _sections(lines, slug)
+        idx = next((i for i in range(a_start + 1, a_end) if lines[i] == f"- [ ] {item}"), None)
+        if idx is None:
+            raise VaultWriteError("Ese pendiente ya no está abierto (cambió desde que lo propuse)")
+        block_end = idx + 1
+        while block_end < a_end and lines[block_end].startswith((" ", "\t")) and lines[block_end].strip():
+            block_end += 1
+        moved = [f"- [x] {item} · resuelto {today}", *lines[idx + 1:block_end]]
+        del lines[idx:block_end]
+
+        if r_start == -1:
+            while lines and not lines[-1].strip():
+                lines.pop()
+            lines += ["", "## Resueltos", "", *moved, ""]
+        else:
+            if r_start > idx:  # Resueltos viene después: los índices se corrieron
+                shift = block_end - idx
+                r_start -= shift
+                r_end -= shift
+            insert_at = r_start + 1
+            for i in range(r_start + 1, r_end):
+                if lines[i].strip():
+                    insert_at = i + 1
+            if insert_at == r_start + 1:
+                lines[insert_at:insert_at] = ["", *moved]
+            else:
+                lines[insert_at:insert_at] = moved
+        card = folder / f"{slug}.md"
+        _write(path, _touch_actualizado("\n".join(lines), today))
+        _write(card, _touch_actualizado(_read(card), today))
+        diario = _log_diario(slug, f"pendiente resuelto: {item}")
+        commit = _commit([path, card, *diario], f"artemis: pendiente resuelto en {slug}")
+    logger.info("Pendiente resuelto en %s (%s)", slug, commit)
+    return {"project": slug, "file": f"01-proyectos/{slug}/pendientes.md", "line": moved[0], "commit": commit}
