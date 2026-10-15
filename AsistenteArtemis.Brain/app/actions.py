@@ -19,7 +19,7 @@ import unicodedata
 import uuid
 from dataclasses import dataclass, field
 
-from app import vault, vault_write
+from app import research, vault, vault_write
 
 logger = logging.getLogger("brain.actions")
 
@@ -62,6 +62,24 @@ TOOLS = [
     },
     {
         "type": "function",
+        "name": "investigar",
+        "description": (
+            "Investiga en la web una duda sobre un proyecto o una idea: legalidad (leyes, licencias, políticas "
+            "de tiendas de apps), rentabilidad o tamaño de un nicho, competencia, viabilidad. Úsala cuando el "
+            "usuario pregunte «¿esto toparía con algo legal?», «¿qué tan rentable sería?» y similares. "
+            "No escribe nada en el cerebro."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pregunta": {"type": "string", "description": "La pregunta completa y autocontenida, con la funcionalidad o el nicho concretos."},
+                "proyecto": {"type": "string", "description": "Slug del proyecto al que se refiere, si corresponde a uno de la lista; vacío si no."},
+            },
+            "required": ["pregunta"],
+        },
+    },
+    {
+        "type": "function",
         "name": "proponer_proyecto_idea",
         "description": (
             "Propone registrar una IDEA de proyecto nuevo (por ejemplo: «se me ocurrió un videojuego de X, "
@@ -82,7 +100,7 @@ TOOLS = [
 ]
 
 TOOLS_INSTRUCTION = """# Acciones sobre el cerebro de proyectos
-Si el usuario te pide anotar algo en un proyecto, usá la herramienta `proponer_pendiente` (si es una tarea por hacer) o `proponer_comentario` (si es contexto u observación de un proyecto que ya existe). El slug del proyecto debe ser uno de los de la lista de abajo; si no queda claro a cuál se refiere, preguntale en vez de adivinar. Si cuenta una idea de proyecto nuevo, usá `proponer_proyecto_idea`. No digas que ya anotaste nada: el sistema le mostrará al usuario lo que se va a anotar y le pedirá confirmación."""
+Si el usuario te pide anotar algo en un proyecto, usá la herramienta `proponer_pendiente` (si es una tarea por hacer) o `proponer_comentario` (si es contexto u observación de un proyecto que ya existe). El slug del proyecto debe ser uno de los de la lista de abajo; si no queda claro a cuál se refiere, preguntale en vez de adivinar. Si pregunta por legalidad, rentabilidad, competencia o viabilidad de algo, usá `investigar` (no respondas de memoria). Si cuenta una idea de proyecto nuevo, usá `proponer_proyecto_idea`. No digas que ya anotaste nada: el sistema le mostrará al usuario lo que se va a anotar y le pedirá confirmación."""
 
 _KINDS = {
     "proponer_pendiente": "pendiente",
@@ -131,6 +149,46 @@ def _function_calls(interaction) -> list[tuple[str, dict]]:
         if getattr(step, "type", None) == "function_call":
             calls.append((step.name, dict(step.arguments or {})))
     return calls
+
+
+def research_requests(interaction) -> list[dict]:
+    """Pedidos de `investigar` del modelo: [{"pregunta", "proyecto"}]. El proyecto se descarta si no existe."""
+    valid = {p["id"] for p in vault.project_status()}
+    requests = []
+    for name, args in _function_calls(interaction):
+        if name != "investigar":
+            continue
+        question = " ".join(str(args.get("pregunta") or "").split())
+        slug = str(args.get("proyecto") or "").strip()
+        if question:
+            requests.append({"pregunta": question, "proyecto": slug if slug in valid else None})
+    return requests
+
+
+def store_proposals(session_id: uuid.UUID, proposals: list[Proposal]) -> None:
+    with _lock:
+        _pending[session_id] = _Pending(proposals)
+
+
+def research_reply(session_id: uuid.UUID, requests: list[dict], client, model: str) -> str:
+    """Hace la primera investigación pedida y arma la respuesta. Si fue sobre un proyecto, deja una
+    propuesta (a confirmar) para guardar el resumen en su bitácora."""
+    request = requests[0]
+    try:
+        result = research.investigate(client, model, request["pregunta"], request["proyecto"])
+    except research.ResearchLimitError as e:
+        return str(e)
+    except Exception:
+        logger.exception("Falló la investigación")
+        return "No pude completar la investigación (falló la búsqueda o la API de Gemini). Intenta de nuevo en un rato."
+
+    reply = research.format_reply(result)
+    slug = request["proyecto"]
+    if slug and result.summary:
+        nombre = next((p["nombre"] for p in vault.project_status() if p["id"] == slug), slug)
+        store_proposals(session_id, [Proposal("comentario", slug, research.comment_text(request["pregunta"], result))])
+        reply += f"\n\n¿Guardo un resumen en la bitácora de **{nombre}**? (sí / no)"
+    return reply
 
 
 def propose_from_interaction(session_id: uuid.UUID, interaction) -> str | None:

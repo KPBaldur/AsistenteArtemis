@@ -28,3 +28,8 @@ VAULT_PATH = os.environ.get("VAULT_PATH") or None
 VAULT_OWNER_USER_ID = os.environ.get("VAULT_OWNER_USER_ID") or None
 VAULT_GIT_PULL = os.environ.get("VAULT_GIT_PULL", "true").lower() not in ("0", "false", "no")
 VAULT_ENABLED = bool(VAULT_PATH and VAULT_OWNER_USER_ID)
+
+# Modelos de Gemini. El chat (con herramientas) y la investigación con búsqueda web pueden usar
+# modelos distintos, p. ej. un Flash-Lite barato para el chat y un Flash más capaz para investigar.
+GEMINI_CHAT_MODEL = os.environ.get("GEMINI_CHAT_MODEL") or "gemini-3.6-flash"
+GEMINI_RESEARCH_MODEL = os.environ.get("GEMINI_RESEARCH_MODEL") or GEMINI_CHAT_MODEL

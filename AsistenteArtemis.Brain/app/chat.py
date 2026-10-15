@@ -7,7 +7,9 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app import actions, vault
-from app.config import GEMINI_API_KEY, INTERNAL_API_KEY, VAULT_ENABLED, VAULT_OWNER_USER_ID
+from app.config import (
+    GEMINI_API_KEY, GEMINI_CHAT_MODEL, GEMINI_RESEARCH_MODEL, INTERNAL_API_KEY, VAULT_ENABLED, VAULT_OWNER_USER_ID,
+)
 from app.db import get_db
 from app.embeddings import embed_texts
 from app.identity import build_system_instruction
@@ -15,7 +17,7 @@ from app.models import AIMessage, Alarm, Note, NoteEmbedding, Task, VaultChunk
 
 router = APIRouter(prefix="/internal", tags=["chat"])
 
-CHAT_MODEL = "gemini-3.6-flash"  # mismo modelo probado en producción en uma-backend
+CHAT_MODEL = GEMINI_CHAT_MODEL  # por defecto gemini-3.6-flash, el probado en producción en uma-backend
 TOP_K_CHUNKS = 5
 TOP_K_VAULT_CHUNKS = 6
 HISTORY_MESSAGES = 10
@@ -175,6 +177,11 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)) -> ChatResponse:
         raise HTTPException(status_code=502, detail=f"No se pudo generar la respuesta (falló la API de Gemini): {e}")
 
     if is_vault_owner:
+        research_requests = actions.research_requests(interaction)
+        if research_requests:
+            return ChatResponse(
+                reply=actions.research_reply(request.session_id, research_requests, _client, GEMINI_RESEARCH_MODEL)
+            )
         confirmation = actions.propose_from_interaction(request.session_id, interaction)
         if confirmation is not None:
             return ChatResponse(reply=confirmation)
